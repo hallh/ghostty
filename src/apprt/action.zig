@@ -291,6 +291,10 @@ pub const Action = union(Key) {
     /// Show a native GUI notification about the progress of some TUI operation.
     progress_report: terminal.osc.Command.ProgressReport,
 
+    /// Open the LLM command assistant dialog to get command suggestions
+    /// from an external LLM API.
+    llm_command_assistant,
+
     /// Sync with: ghostty_action_tag_e
     pub const Key = enum(c_int) {
         quit,
@@ -345,6 +349,7 @@ pub const Action = union(Key) {
         open_url,
         show_child_exited,
         progress_report,
+        llm_command_assistant,
     };
 
     /// Sync with: ghostty_action_u

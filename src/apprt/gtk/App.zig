@@ -525,6 +525,7 @@ pub fn performAction(
         .show_child_exited => return try self.showChildExited(target, value),
         .progress_report => return try self.handleProgressReport(target, value),
         .render => self.render(target),
+        .llm_command_assistant => try self.llmCommandAssistant(target),
 
         // Unimplemented
         .close_all_windows,
@@ -1888,4 +1889,11 @@ fn openUrl(
         value.kind,
         value.url,
     ) catch |err| log.warn("unable to open url: {}", .{err});
+}
+
+fn llmCommandAssistant(self: *App, target: apprt.Target) !void {
+    _ = self;
+    _ = target;
+    log.info("LLM Command Assistant action triggered", .{});
+    return;
 }

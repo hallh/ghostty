@@ -2550,8 +2550,8 @@ keybind: Keybinds = .{},
 /// The "transparent" style will also update in real-time to dynamic
 /// changes to the window background color, e.g. via OSC 11. To make this
 /// more aesthetically pleasing, this only happens if the terminal is
-/// a window, tab, or split that borders the top of the window. This
-/// avoids a disjointed appearance where the titlebar color changes
+/// a window, tab, or split that borders the top of the window.
+/// This avoids a disjointed appearance where the titlebar color changes
 /// but all the topmost terminals don't match.
 ///
 /// The "tabs" style is a completely custom titlebar that integrates the
@@ -3051,6 +3051,72 @@ term: []const u8 = "xterm-ghostty",
 ///
 /// This only works on macOS since only macOS has an auto-update feature.
 @"auto-update-channel": ?build_config.ReleaseChannel = null,
+
+/// API key for LLM command assistant. This key will be used to authenticate
+/// requests to the configured LLM provider. Store this securely in your
+/// configuration file.
+///
+/// Example: `ext-llm-api-key = "your-api-key-here"`
+///
+/// Available since: 1.3.0
+@"ext-llm-api-key": ?[]const u8 = null,
+
+/// LLM provider to use for command suggestions. Supported providers are:
+///
+///   * `anthropic` - Uses Claude models via Anthropic's API
+///   * `openai` - Uses GPT models via OpenAI's API
+///   * `gemini` - Uses Gemini models via Google's API
+///
+/// Each provider may have different API key requirements and model options.
+/// See the provider's documentation for details.
+///
+/// Available since: 1.3.0
+@"ext-llm-provider": LLMProvider = .anthropic,
+
+/// Model name to use for the configured provider. If not specified, uses
+/// the provider's default model:
+///
+///   * Anthropic: `claude-3-5-sonnet-20241022`
+///   * OpenAI: `gpt-4o`
+///   * Gemini: `gemini-2.0-flash`
+///
+/// Check your provider's documentation for available models.
+///
+/// Available since: 1.3.0
+@"ext-llm-model": ?[]const u8 = null,
+
+/// Temperature for response generation (0.0-1.0). Lower values make the
+/// model more focused and deterministic, higher values make it more creative
+/// and random. For command suggestions, lower values (0.1-0.3) are typically
+/// better for consistent, accurate results.
+///
+/// Available since: 1.3.0
+@"ext-llm-temperature": f32 = 0.1,
+
+/// Maximum number of tokens to generate in the response. This controls the
+/// length of the command suggestion. For most command suggestions, 1024
+/// tokens should be more than sufficient.
+///
+/// Available since: 1.3.0
+@"ext-llm-max-tokens": u32 = 1024,
+
+/// Custom system prompt to override the default. The default prompt instructs
+/// the model to provide only the exact command needed without explanation.
+/// Only change this if you understand how it will affect the response format.
+///
+/// Default: "You are a Linux command assistant. Given a user's description,
+/// provide only the exact command they need. Respond with just the command,
+/// no explanation."
+///
+/// Available since: 1.3.0
+@"ext-llm-system-prompt": ?[]const u8 = null,
+
+/// Number of previous prompts to keep in history for navigation with up/down
+/// arrow keys. History is kept in memory only and is cleared when Ghostty
+/// exits.
+///
+/// Available since: 1.3.0
+@"ext-llm-history-size": u32 = 50,
 
 /// This is set by the CLI parser for deinit.
 _arena: ?ArenaAllocator = null,
@@ -5431,6 +5497,13 @@ pub const Keybinds = struct {
             .{ .write_screen_file = .open },
         );
 
+        // LLM Command Assistant
+        try self.set.put(
+            alloc,
+            .{ .key = .{ .unicode = 'k' }, .mods = .{ .ctrl = true, .shift = true } },
+            .{ .llm_command_assistant = {} },
+        );
+
         // Expand Selection
         try self.set.putFlags(
             alloc,
@@ -7359,6 +7432,12 @@ pub const AutoUpdate = enum {
     off,
     check,
     download,
+};
+
+pub const LLMProvider = enum {
+    anthropic,
+    openai,
+    gemini,
 };
 
 /// See background-blur

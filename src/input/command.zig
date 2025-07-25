@@ -459,6 +459,12 @@ fn actionCommands(action: Action.Key) []const Command {
             .description = "Quit the application.",
         }},
 
+        .llm_command_assistant => comptime &.{.{
+            .action = .llm_command_assistant,
+            .title = "LLM Command Assistant",
+            .description = "Open AI-powered command suggestion dialog.",
+        }},
+
         // No commands because they're parameterized and there
         // aren't obvious values users would use. It is possible that
         // these may have commands in the future if there are very
