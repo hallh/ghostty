@@ -1,0 +1,170 @@
+using Gtk 4.0;
+using Adw 1;
+
+Adw.Dialog llm-assistant-dialog {
+  content-width: 600;
+  content-height: 400;
+
+  Adw.ToolbarView {
+    top-bar-style: flat;
+
+    [top]
+    Adw.HeaderBar {
+      [title]
+      Label {
+        label: _("Command Assistant");
+      }
+    }
+
+    Box {
+      orientation: vertical;
+      spacing: 12;
+      margin-top: 12;
+      margin-bottom: 12;
+      margin-start: 12;
+      margin-end: 12;
+
+      // Input section
+      Box {
+        orientation: vertical;
+        spacing: 6;
+
+        Label {
+          label: _("Describe what you want to do:");
+          halign: start;
+
+          styles [
+            "heading"
+          ]
+        }
+
+        Entry prompt-entry {
+          placeholder-text: _("e.g., \"list all files including hidden ones\"");
+          hexpand: true;
+
+          styles [
+            "card"
+          ]
+        }
+
+        Box {
+          orientation: horizontal;
+          spacing: 6;
+          halign: end;
+
+          Button cancel-button {
+            label: _("Cancel");
+
+            styles [
+              "flat"
+            ]
+          }
+
+          Button submit-button {
+            label: _("Get Suggestion");
+            sensitive: false;
+
+            styles [
+              "suggested-action"
+            ]
+          }
+        }
+      }
+
+      // Suggestion section
+      Box suggestion-box {
+        orientation: vertical;
+        spacing: 6;
+        visible: false;
+
+        Label {
+          label: _("Suggested Command:");
+          halign: start;
+
+          styles [
+            "heading"
+          ]
+        }
+
+        ScrolledWindow {
+          min-content-height: 120;
+          max-content-height: 200;
+
+          TextView suggestion-text {
+            editable: false;
+            cursor-visible: false;
+            wrap-mode: word_char;
+            left-margin: 12;
+            right-margin: 12;
+            top-margin: 8;
+            bottom-margin: 8;
+
+            styles [
+              "card",
+              "monospace"
+            ]
+          }
+        }
+
+        // Progress indicator for streaming
+        ProgressBar progress-bar {
+          visible: false;
+          pulse-step: 0.1;
+
+          styles [
+            "osd"
+          ]
+        }
+
+        // Error message area  
+        Label error-label {
+          visible: false;
+          wrap: true;
+          wrap-mode: word_char;
+          halign: start;
+          justify: fill;
+
+          styles [
+            "error",
+            "body"
+          ]
+        }
+
+        Box {
+          orientation: horizontal;
+          spacing: 6;
+          halign: end;
+
+          Button clear-button {
+            label: _("Clear");
+            visible: false;
+
+            styles [
+              "flat"
+            ]
+          }
+
+          Button accept-button {
+            label: _("Accept Command");
+            visible: false;
+
+            styles [
+              "suggested-action"
+            ]
+          }
+        }
+      }
+
+      // History navigation hint
+      Label {
+        label: _("Use ↑↓ arrow keys to navigate command history");
+        halign: start;
+
+        styles [
+          "caption",
+          "dim-label"
+        ]
+      }
+    }
+  }
+} 

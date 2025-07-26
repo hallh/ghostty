@@ -1891,9 +1891,19 @@ fn openUrl(
     ) catch |err| log.warn("unable to open url: {}", .{err});
 }
 
-fn llmCommandAssistant(self: *App, target: apprt.Target) !void {
-    _ = self;
-    _ = target;
-    log.info("LLM Command Assistant action triggered", .{});
-    return;
+fn llmCommandAssistant(_: *App, target: apprt.Target) !void {
+    switch (target) {
+        .app => {},
+        .surface => |surface| {
+            const window = surface.rt_surface.container.window() orelse {
+                log.info(
+                    "llmCommandAssistant invalid for container={s}",
+                    .{@tagName(surface.rt_surface.container)},
+                );
+                return;
+            };
+
+            window.showLLMAssistant();
+        },
+    }
 }

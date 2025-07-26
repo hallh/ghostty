@@ -6,6 +6,7 @@ set -e
 skip_tests=false
 show_help=false
 test_filter=""
+compare_main=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -22,6 +23,10 @@ while [[ $# -gt 0 ]]; do
                 test_filter="$2"
                 shift 2
             fi
+            ;;
+        -m|--compare-main)
+            compare_main=true
+            shift
             ;;
         -h|--help)
             show_help=true
@@ -43,6 +48,7 @@ if [ "$show_help" = true ]; then
     echo "Options:"
     echo "  -s, --skip-tests       Skip running tests, use existing coverage data"
     echo "  -f, --filter PATTERN   Filter tests by pattern (passed to zig build test -Dtest-filter=PATTERN)"
+    echo "  -m, --compare-main     Compare against main branch instead of workspace changes"
     echo "  -h, --help             Show this help message"
     echo ""
     echo "Examples:"
@@ -50,6 +56,8 @@ if [ "$show_help" = true ]; then
     echo "  $0 --skip-tests              # Skip tests, analyze existing coverage"
     echo "  $0 --filter \"terminal\"       # Run only tests matching 'terminal'"
     echo "  $0 -f config --skip-tests    # Skip tests, but show filter would be 'config'"
+    echo "  $0 --compare-main            # Check changed/added files vs main branch"
+    echo "  $0 -m -s                     # Compare vs main, skip tests"
     echo ""
     exit 0
 fi
@@ -110,7 +118,11 @@ if [ -n "$test_filter" ]; then
 fi
 echo ""
 
-echo "Analyzing coverage gaps in changed files..."
+if [ "$compare_main" = true ]; then
+    echo "Analyzing coverage gaps in files changed vs main branch..."
+else
+    echo "Analyzing coverage gaps in changed files..."
+fi
 echo "=========================================="
 
 # Function to parse uncovered lines from coverage output
@@ -145,18 +157,53 @@ parse_uncovered_lines() {
 # Function to parse changed lines from git diff
 get_changed_lines() {
     local file="$1"
-    git diff -U0 "$file" | grep '^@@' | while IFS= read -r line; do
-        # Parse @@ -old_start,old_count +new_start,new_count @@
-        if [[ "$line" =~ @@\ -[0-9]+(,[0-9]+)?\ \+([0-9]+)(,([0-9]+))?\ @@ ]]; then
-            new_start=${BASH_REMATCH[2]}
-            new_count=${BASH_REMATCH[4]:-1}
-            
-            # Generate line numbers for the new/changed lines
-            if [ "$new_count" -gt 0 ]; then
-                seq "$new_start" $((new_start + new_count - 1))
+    local compare_against_main="$2"
+    
+    # Check if file is untracked (new file)
+    if git ls-files --others --exclude-standard | grep -q "^${file}$"; then
+        # For untracked files, all lines are "changed"
+        if [ -f "$file" ]; then
+            wc -l < "$file" | xargs seq 1
+        fi
+        return
+    fi
+    
+    if [ "$compare_against_main" = true ]; then
+        # Try different comparison strategies for compare-main mode
+        if git show main:"$file" >/dev/null 2>&1; then
+            # File exists in main, compare against it
+            git diff -U0 main -- "$file" | grep '^@@' | while IFS= read -r line; do
+                # Parse @@ -old_start,old_count +new_start,new_count @@
+                if [[ "$line" =~ @@\ -[0-9]+(,[0-9]+)?\ \+([0-9]+)(,([0-9]+))?\ @@ ]]; then
+                    new_start=${BASH_REMATCH[2]}
+                    new_count=${BASH_REMATCH[4]:-1}
+                    
+                    # Generate line numbers for the new/changed lines
+                    if [ "$new_count" -gt 0 ]; then
+                        seq "$new_start" $((new_start + new_count - 1))
+                    fi
+                fi
+            done | sort -n | uniq
+        else
+            # File doesn't exist in main (new file), all lines are changed
+            if [ -f "$file" ]; then
+                wc -l < "$file" | xargs seq 1
             fi
         fi
-    done | sort -n | uniq
+    else
+        git diff -U0 "$file" | grep '^@@' | while IFS= read -r line; do
+            # Parse @@ -old_start,old_count +new_start,new_count @@
+            if [[ "$line" =~ @@\ -[0-9]+(,[0-9]+)?\ \+([0-9]+)(,([0-9]+))?\ @@ ]]; then
+                new_start=${BASH_REMATCH[2]}
+                new_count=${BASH_REMATCH[4]:-1}
+                
+                # Generate line numbers for the new/changed lines
+                if [ "$new_count" -gt 0 ]; then
+                    seq "$new_start" $((new_start + new_count - 1))
+                fi
+            fi
+        done | sort -n | uniq
+    fi
 }
 
 # Function to check if lines intersect
@@ -262,10 +309,23 @@ format_line_ranges() {
 }
 
 # Get list of modified files from git
-modified_files=$(git diff --name-only --diff-filter=M | grep -E '\.(zig|c|cpp|h)$' | grep '^src/' || true)
+if [ "$compare_main" = true ]; then
+    # Get all files that differ from main: committed changes + staged + unstaged + untracked
+    committed_files=$(git diff --name-only main...HEAD --diff-filter=AM | grep -E '\.(zig|c|cpp|h)$' | grep '^src/' || true)
+    staged_files=$(git diff --name-only --cached | grep -E '\.(zig|c|cpp|h)$' | grep '^src/' || true)
+    unstaged_files=$(git diff --name-only | grep -E '\.(zig|c|cpp|h)$' | grep '^src/' || true)
+    untracked_files=$(git ls-files --others --exclude-standard | grep -E '\.(zig|c|cpp|h)$' | grep '^src/' || true)
+    
+    # Combine all file lists and remove duplicates
+    modified_files=$(printf "%s\n%s\n%s\n%s\n" "$committed_files" "$staged_files" "$unstaged_files" "$untracked_files" | grep -v '^$' | sort -u || true)
+    files_description="changed/added source files vs main branch"
+else
+    modified_files=$(git diff --name-only --diff-filter=M | grep -E '\.(zig|c|cpp|h)$' | grep '^src/' || true)
+    files_description="modified source files"
+fi
 
 if [ -z "$modified_files" ]; then
-    echo "No modified source files found."
+    echo "No $files_description found."
     exit 0
 fi
 
@@ -290,7 +350,7 @@ for file in $modified_files; do
     uncovered_str=$(echo "$coverage_line" | awk '{for(i=3;i<=NF;i++) printf "%s%s", $i, (i<NF?" ":""); print ""}')
     
     # Get changed lines for this file
-    changed_lines=$(get_changed_lines "$file")
+    changed_lines=$(get_changed_lines "$file" "$compare_main")
     
     if [ -z "$changed_lines" ]; then
         continue

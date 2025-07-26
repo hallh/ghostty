@@ -23,6 +23,7 @@ const font = @import("../../font/main.zig");
 const i18n = @import("../../os/main.zig").i18n;
 const input = @import("../../input.zig");
 const CoreSurface = @import("../../Surface.zig");
+const llm_assistant = @import("../../llm_assistant.zig");
 
 const App = @import("App.zig");
 const Builder = @import("Builder.zig");
@@ -35,6 +36,7 @@ const TabView = @import("TabView.zig");
 const HeaderBar = @import("headerbar.zig");
 const CloseDialog = @import("CloseDialog.zig");
 const CommandPalette = @import("CommandPalette.zig");
+const LLMAssistantDialog = @import("LLMAssistantDialog.zig");
 const winprotopkg = @import("winproto.zig");
 const gtk_version = @import("gtk_version.zig");
 const adw_version = @import("adw_version.zig");
@@ -73,6 +75,9 @@ toast_overlay: *adw.ToastOverlay,
 
 /// The command palette.
 command_palette: CommandPalette,
+
+/// The LLM command assistant dialog.
+llm_assistant_dialog: LLMAssistantDialog,
 
 /// See adwTabOverviewOpen for why we have this.
 adw_tab_overview_focus_timer: ?c_uint = null,
@@ -152,6 +157,7 @@ pub fn init(self: *Window, app: *App) !void {
         .titlebar_menu = undefined,
         .toast_overlay = undefined,
         .command_palette = undefined,
+        .llm_assistant_dialog = undefined,
         .winproto = .none,
     };
 
@@ -181,6 +187,7 @@ pub fn init(self: *Window, app: *App) !void {
     self.notebook.init(self);
 
     if (adw_version.supportsDialogs()) try self.command_palette.init(self);
+    if (adw_version.supportsDialogs()) try self.llm_assistant_dialog.init(self);
 
     // If we are using Adwaita, then we can support the tab overview.
     self.tab_overview = if (adw_version.supportsTabOverview()) overview: {
@@ -622,6 +629,7 @@ fn initActions(self: *Window) void {
 pub fn deinit(self: *Window) void {
     self.winproto.deinit(self.app.core_app.alloc);
     if (adw_version.supportsDialogs()) self.command_palette.deinit();
+    if (adw_version.supportsDialogs()) self.llm_assistant_dialog.deinit();
 
     if (self.adw_tab_overview_focus_timer) |timer| {
         _ = glib.Source.remove(timer);
@@ -758,6 +766,23 @@ pub fn toggleCommandPalette(self: *Window) void {
     } else {
         log.warn("libadwaita 1.5+ is required for the command palette", .{});
     }
+}
+
+/// Show the LLM command assistant dialog.
+pub fn showLLMAssistant(self: *Window) void {
+    if (!adw_version.supportsDialogs()) {
+        self.sendToast(i18n._("libadwaita 1.5+ is required for the LLM command assistant"));
+        return;
+    }
+
+    // Check if LLM is properly configured
+    if (!llm_assistant.isConfigured(&self.app.config)) {
+        self.sendToast(i18n._(llm_assistant.getConfigurationError(&self.app.config)));
+        return;
+    }
+
+    // Show the dialog
+    self.llm_assistant_dialog.show();
 }
 
 /// Grabs focus on the currently selected tab.
