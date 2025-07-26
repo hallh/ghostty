@@ -70,13 +70,54 @@ fi
 echo "✅ Code formatting check passed."
 
 if [ "$skip_tests" = false ]; then
+    # Create temporary file to capture output
+    test_output_file=$(mktemp)
+    
     if [ -n "$test_filter" ]; then
         echo "Running coverage tests (filtered: '$test_filter')..."
-        zig build test -Dtest-coverage -Dtest-filter="$test_filter" 2>/dev/null
+        echo "Command: zig build test -Dtest-coverage -Dtest-filter=\"$test_filter\""
+        
+        # Run the command and capture both stdout and stderr
+        set +e  # Temporarily disable exit on error
+        zig build test -Dtest-coverage -Dtest-filter="$test_filter" > "$test_output_file" 2>&1
+        test_exit_code=$?
+        set -e  # Re-enable exit on error
     else
         echo "Running coverage tests..."
-        zig build test -Dtest-coverage 2>/dev/null
+        echo "Command: zig build test -Dtest-coverage"
+        
+        # Run the command and capture both stdout and stderr
+        set +e  # Temporarily disable exit on error
+        zig build test -Dtest-coverage > "$test_output_file" 2>&1
+        test_exit_code=$?
+        set -e  # Re-enable exit on error
     fi
+    
+    # Always show some output so user knows what happened
+    echo "Test command completed with exit code: $test_exit_code"
+    
+    if [ $test_exit_code -ne 0 ]; then
+        echo ""
+        echo "❌ Tests failed with exit code $test_exit_code"
+        echo ""
+        echo "=== Test output ==="
+        cat "$test_output_file"
+        echo "=== End test output ==="
+        
+        # Clean up temp file before exiting
+        rm -f "$test_output_file"
+        exit $test_exit_code
+    else
+        echo "✅ Tests passed successfully"
+        # Show last few lines of output for confirmation
+        echo ""
+        echo "=== Last 10 lines of test output ==="
+        tail -n 10 "$test_output_file"
+        echo "=== End test output ==="
+    fi
+    
+    # Clean up temp file
+    rm -f "$test_output_file"
 else
     if [ -n "$test_filter" ]; then
         echo "Skipping test execution (filter '$test_filter' would have been applied), using existing coverage data..."

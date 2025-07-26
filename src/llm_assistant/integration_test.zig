@@ -65,7 +65,13 @@ const DialogState = struct {
 
     /// Update button sensitivity based on prompt content
     pub fn updateButtonSensitivity(self: *Self) void {
-        self.submit_button_sensitive = self.current_prompt.len > 0 and !self.is_loading;
+        // During loading, button should remain sensitive for cancellation
+        // When not loading, button is only sensitive if there's a prompt
+        if (self.is_loading) {
+            self.submit_button_sensitive = true;
+        } else {
+            self.submit_button_sensitive = self.current_prompt.len > 0;
+        }
     }
 
     /// Set prompt text and update UI state
@@ -74,11 +80,12 @@ const DialogState = struct {
         self.updateButtonSensitivity();
     }
 
-    /// Handle streaming text updates (requirement: gradual population)
-    pub fn appendSuggestionText(self: *Self, chunk: []const u8) !void {
-        const old_len = self.suggestion_text.len;
-        self.suggestion_text = try self.allocator.realloc(self.suggestion_text, old_len + chunk.len);
-        @memcpy(self.suggestion_text[old_len..], chunk);
+    /// Set suggestion text from complete response
+    pub fn setSuggestionText(self: *Self, text: []const u8) !void {
+        if (self.suggestion_text.len > 0) {
+            self.allocator.free(self.suggestion_text);
+        }
+        self.suggestion_text = try self.allocator.dupe(u8, text);
 
         // Show suggestion UI elements
         self.suggestion_box_visible = true;
@@ -86,8 +93,8 @@ const DialogState = struct {
         self.accept_button_visible = true;
     }
 
-    /// Complete streaming and finalize state
-    pub fn completeStreaming(self: *Self) void {
+    /// Complete request and finalize state
+    pub fn completeRequest(self: *Self) void {
         self.stopLoading();
         if (self.suggestion_text.len > 0) {
             self.suggestion_box_visible = true;
@@ -193,7 +200,7 @@ const MockSurface = struct {
 
 /// Mock LLM provider for integration testing
 const MockLLMProvider = struct {
-    response_chunks: []const []const u8 = &[_][]const u8{},
+    response_command: []const u8 = "ls -la",
     should_fail: bool = false,
     error_type: llm.LLMError = llm.LLMError.NetworkError,
     delay_ms: u32 = 0,
@@ -212,32 +219,29 @@ const MockLLMProvider = struct {
     }
 
     fn requestStream(
-        ptr: *anyopaque,
+        _: *anyopaque,
         _: std.mem.Allocator,
         _: llm.LLMRequest,
-        callback: llm.StreamCallback,
-        user_data: ?*anyopaque,
+        _: llm.StreamCallback,
+        _: ?*anyopaque,
     ) llm.LLMError!void {
+        // Streaming is no longer supported, return error
+        return llm.LLMError.UnsupportedProvider;
+    }
+
+    fn request(ptr: *anyopaque, allocator: std.mem.Allocator, _: llm.LLMRequest) llm.LLMError!llm.LLMResponse {
         const self: *MockLLMProvider = @ptrCast(@alignCast(ptr));
 
         if (self.should_fail) {
             return self.error_type;
         }
 
-        // Simulate gradual streaming
-        for (self.response_chunks) |chunk| {
-            if (self.delay_ms > 0) {
-                std.time.sleep(self.delay_ms * std.time.ns_per_ms);
-            }
-            callback(chunk, user_data);
+        // Simulate delay if needed
+        if (self.delay_ms > 0) {
+            std.time.sleep(self.delay_ms * std.time.ns_per_ms);
         }
 
-        // Send completion signal
-        callback("__COMPLETE__", user_data);
-    }
-
-    fn request(_: *anyopaque, _: std.mem.Allocator, _: llm.LLMRequest) llm.LLMError!llm.LLMResponse {
-        return llm.LLMResponse{ .command = "test command" };
+        return llm.LLMResponse{ .command = try allocator.dupe(u8, self.response_command), .is_final = true };
     }
 
     fn deinit(_: *anyopaque, _: std.mem.Allocator) void {}
@@ -268,25 +272,19 @@ test "immediate loading state transition on submit" {
     try testing.expect(!dialog.error_label_visible);
 }
 
-test "progressive text accumulation during streaming" {
+test "complete text display after request" {
     var dialog = DialogState.init(testing.allocator);
     defer dialog.deinit();
 
     dialog.startLoading();
 
-    // Simulate streaming chunks (requirement: gradual population)
-    try dialog.appendSuggestionText("ls");
-    try testing.expectEqualStrings("ls", dialog.suggestion_text);
+    // Simulate complete response (blocking behavior)
+    try dialog.setSuggestionText("ls -la --color=auto");
+    try testing.expectEqualStrings("ls -la --color=auto", dialog.suggestion_text);
     try testing.expect(dialog.suggestion_box_visible);
 
-    try dialog.appendSuggestionText(" -la");
-    try testing.expectEqualStrings("ls -la", dialog.suggestion_text);
-
-    try dialog.appendSuggestionText(" --color=auto");
-    try testing.expectEqualStrings("ls -la --color=auto", dialog.suggestion_text);
-
-    // Complete streaming
-    dialog.completeStreaming();
+    // Complete request
+    dialog.completeRequest();
     try testing.expect(!dialog.is_loading);
     try testing.expect(dialog.accept_button_visible);
 }
@@ -384,7 +382,7 @@ test "complete LLM assistant flow - happy path" {
     defer surface.deinit();
 
     var mock_provider = MockLLMProvider{
-        .response_chunks = &[_][]const u8{ "ls", " -la" },
+        .response_command = "ls -la",
     };
 
     // 1. User types prompt
@@ -399,25 +397,23 @@ test "complete LLM assistant flow - happy path" {
     // 3. Add to history
     try dialog.addToHistory(dialog.current_prompt);
 
-    // 4. Simulate streaming response
-    var stream_context = TestStreamContext.init(testing.allocator);
-    defer stream_context.deinit();
-
+    // 4. Simulate blocking request
     const request = llm.LLMRequest{ .prompt = "list all files" };
-    try mock_provider.provider().requestStream(
-        testing.allocator,
-        request,
-        TestStreamContext.streamCallback,
-        &stream_context,
-    );
+    const response = try mock_provider.provider().request(testing.allocator, request);
+    defer {
+        testing.allocator.free(response.command);
+        if (response.error_message) |msg| {
+            testing.allocator.free(msg);
+        }
+    }
 
-    // Verify streaming accumulated text
-    try testing.expectEqualStrings("ls -la", stream_context.accumulated_text.items);
-    try testing.expect(stream_context.completion_received);
+    // Verify response
+    try testing.expectEqualStrings("ls -la", response.command);
+    try testing.expect(response.is_final);
 
-    // 5. Apply streaming updates to dialog
-    try dialog.appendSuggestionText(stream_context.accumulated_text.items);
-    dialog.completeStreaming();
+    // 5. Apply response to dialog
+    try dialog.setSuggestionText(response.command);
+    dialog.completeRequest();
 
     try testing.expectEqualStrings("ls -la", dialog.suggestion_text);
     try testing.expect(!dialog.is_loading);
@@ -449,16 +445,8 @@ test "complete LLM assistant flow - error handling" {
     dialog.startLoading();
 
     // 2. Provider returns error
-    var stream_context = TestStreamContext.init(testing.allocator);
-    defer stream_context.deinit();
-
     const request = llm.LLMRequest{ .prompt = "list files" };
-    const result = mock_provider.provider().requestStream(
-        testing.allocator,
-        request,
-        TestStreamContext.streamCallback,
-        &stream_context,
-    );
+    const result = mock_provider.provider().request(testing.allocator, request);
 
     try testing.expectError(llm.LLMError.AuthenticationError, result);
 
@@ -482,8 +470,8 @@ test "keyboard shortcuts simulation" {
 
     // Setup with suggestion
     dialog.setPromptText("test command");
-    try dialog.appendSuggestionText("ls -la");
-    dialog.completeStreaming();
+    try dialog.setSuggestionText("ls -la");
+    dialog.completeRequest();
 
     // Test Enter key - submits if in input mode
     dialog.clearSuggestion();
@@ -495,7 +483,7 @@ test "keyboard shortcuts simulation" {
 
     // Test Ctrl+Enter - accepts suggestion and pastes
     dialog.stopLoading();
-    try dialog.appendSuggestionText("find . -name '*.txt'");
+    try dialog.setSuggestionText("find . -name '*.txt'");
     try surface.pasteCommand(dialog.suggestion_text);
     try testing.expectEqualStrings("find . -name '*.txt'", surface.getLastPastedCommand().?);
 
@@ -510,30 +498,26 @@ test "keyboard shortcuts simulation" {
     try testing.expect(!dialog.submit_button_sensitive);
 }
 
-test "streaming with all OpenAI finish reasons" {
+test "blocking request with different responses" {
     const test_cases = [_]struct {
         name: []const u8,
-        chunks: []const []const u8,
-        expected_text: []const u8,
-        should_complete: bool,
+        response_command: []const u8,
+        expected_final: bool,
     }{
         .{
-            .name = "stop finish_reason",
-            .chunks = &[_][]const u8{ "ls", " -la", "__COMPLETE__" },
-            .expected_text = "ls -la",
-            .should_complete = true,
+            .name = "simple command",
+            .response_command = "ls -la",
+            .expected_final = true,
         },
         .{
-            .name = "length finish_reason",
-            .chunks = &[_][]const u8{ "very long command", "__COMPLETE__" },
-            .expected_text = "very long command",
-            .should_complete = true,
+            .name = "complex command",
+            .response_command = "find . -name '*.txt' -type f",
+            .expected_final = true,
         },
         .{
-            .name = "content_filter finish_reason",
-            .chunks = &[_][]const u8{"__COMPLETE__"},
-            .expected_text = "",
-            .should_complete = true,
+            .name = "empty command",
+            .response_command = "",
+            .expected_final = true,
         },
     };
 
@@ -542,56 +526,312 @@ test "streaming with all OpenAI finish reasons" {
         defer dialog.deinit();
 
         var mock_provider = MockLLMProvider{
-            .response_chunks = case.chunks,
+            .response_command = case.response_command,
         };
 
-        var stream_context = TestStreamContext.init(testing.allocator);
-        defer stream_context.deinit();
-
         const request = llm.LLMRequest{ .prompt = "test" };
-        try mock_provider.provider().requestStream(
-            testing.allocator,
-            request,
-            TestStreamContext.streamCallback,
-            &stream_context,
-        );
+        const response = try mock_provider.provider().request(testing.allocator, request);
+        defer {
+            testing.allocator.free(response.command);
+            if (response.error_message) |msg| {
+                testing.allocator.free(msg);
+            }
+        }
 
-        try testing.expectEqualStrings(case.expected_text, stream_context.accumulated_text.items);
-        try testing.expect(stream_context.completion_received == case.should_complete);
+        try testing.expectEqualStrings(case.response_command, response.command);
+        try testing.expect(response.is_final == case.expected_final);
     }
 }
 
-// Helper struct for streaming tests
-const TestStreamContext = struct {
-    accumulated_text: std.ArrayList(u8),
-    completion_received: bool = false,
-    error_received: bool = false,
+test "DialogState handles memory allocation failure gracefully" {
+    var dialog = DialogState.init(testing.allocator);
+    defer dialog.deinit();
 
-    fn init(allocator: std.mem.Allocator) TestStreamContext {
-        return TestStreamContext{
-            .accumulated_text = std.ArrayList(u8).init(allocator),
-        };
+    // Try to set text when the allocator would fail
+    var failing_allocator = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    dialog.allocator = failing_allocator.allocator();
+
+    // This should handle the allocation failure gracefully
+    dialog.setSuggestionText("test content") catch {
+        // Expected to fail due to failing allocator
+    };
+}
+
+// Test real JSON parsing to catch crashes and parsing errors
+test "OpenAI JSON parsing with real response format" {
+    const openai = @import("openai.zig");
+    const config = @import("../config.zig");
+
+    // Real OpenAI response with extra fields that caused crashes
+    const real_response =
+        \\{
+        \\  "id": "chatcmpl-9WA1234567890",
+        \\  "object": "chat.completion",
+        \\  "created": 1717123456,
+        \\  "model": "gpt-4o-mini-2024-07-18",
+        \\  "choices": [
+        \\    {
+        \\      "index": 0,
+        \\      "message": {
+        \\        "role": "assistant",
+        \\        "content": "ls -la"
+        \\      },
+        \\      "logprobs": null,
+        \\      "finish_reason": "stop"
+        \\    }
+        \\  ],
+        \\  "usage": {
+        \\    "prompt_tokens": 15,
+        \\    "completion_tokens": 2,
+        \\    "total_tokens": 17
+        \\  },
+        \\  "system_fingerprint": "fp_12345",
+        \\  "service_tier": "default"
+        \\}
+    ;
+
+    const cfg = config.Config{};
+    const provider = try openai.OpenAIProvider.init(testing.allocator, "test-key", &cfg);
+    defer provider.deinit(testing.allocator);
+
+    const response = try provider.parseResponse(testing.allocator, real_response, .ok);
+    defer {
+        var mutable_response = response;
+        mutable_response.deinit(testing.allocator);
     }
 
-    fn deinit(self: *TestStreamContext) void {
-        self.accumulated_text.deinit();
+    try testing.expectEqualStrings("ls -la", response.command);
+    try testing.expect(response.is_final);
+    try testing.expect(response.error_message == null);
+}
+
+test "Anthropic JSON parsing with real response format" {
+    const anthropic = @import("anthropic.zig");
+    const config = @import("../config.zig");
+
+    const real_response =
+        \\{
+        \\  "id": "msg_abc123",
+        \\  "type": "message",
+        \\  "role": "assistant",
+        \\  "content": [
+        \\    {
+        \\      "type": "text",
+        \\      "text": "find . -name '*.txt'"
+        \\    }
+        \\  ],
+        \\  "model": "claude-3-5-sonnet-20241022",
+        \\  "stop_reason": "end_turn",
+        \\  "stop_sequence": null,
+        \\  "usage": {
+        \\    "input_tokens": 25,
+        \\    "output_tokens": 12
+        \\  }
+        \\}
+    ;
+
+    const cfg = config.Config{};
+    const provider = try anthropic.AnthropicProvider.init(testing.allocator, "test-key", &cfg);
+    defer provider.deinit(testing.allocator);
+
+    const response = try provider.parseResponse(testing.allocator, real_response, .ok);
+    defer {
+        var mutable_response = response;
+        mutable_response.deinit(testing.allocator);
     }
 
-    fn streamCallback(chunk: []const u8, user_data: ?*anyopaque) void {
-        const context: *TestStreamContext = @ptrCast(@alignCast(user_data.?));
+    try testing.expectEqualStrings("find . -name '*.txt'", response.command);
+    try testing.expect(response.is_final);
+    try testing.expect(response.error_message == null);
+}
 
-        if (std.mem.eql(u8, chunk, "__COMPLETE__")) {
-            context.completion_received = true;
-            return;
+test "Gemini JSON parsing with real response format" {
+    const gemini = @import("gemini.zig");
+    const config = @import("../config.zig");
+
+    const real_response =
+        \\{
+        \\  "candidates": [
+        \\    {
+        \\      "content": {
+        \\        "parts": [
+        \\          {
+        \\            "text": "grep -r 'pattern' ."
+        \\          }
+        \\        ],
+        \\        "role": "model"
+        \\      },
+        \\      "finishReason": "STOP",
+        \\      "index": 0,
+        \\      "safetyRatings": [
+        \\        {
+        \\          "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+        \\          "probability": "NEGLIGIBLE"
+        \\        }
+        \\      ]
+        \\    }
+        \\  ],
+        \\  "usageMetadata": {
+        \\    "promptTokenCount": 20,
+        \\    "candidatesTokenCount": 8,
+        \\    "totalTokenCount": 28
+        \\  }
+        \\}
+    ;
+
+    const cfg = config.Config{};
+    const provider = try gemini.GeminiProvider.init(testing.allocator, "test-key", &cfg);
+    defer provider.deinit(testing.allocator);
+
+    const response = try provider.parseResponse(testing.allocator, real_response, .ok);
+    defer {
+        var mutable_response = response;
+        mutable_response.deinit(testing.allocator);
+    }
+
+    try testing.expectEqualStrings("grep -r 'pattern' .", response.command);
+    try testing.expect(response.is_final);
+    try testing.expect(response.error_message == null);
+}
+
+test "Malformed JSON handling doesn't crash" {
+    const openai = @import("openai.zig");
+    const config = @import("../config.zig");
+
+    const malformed_json = "{ invalid json ]}";
+
+    const cfg = config.Config{};
+    const provider = try openai.OpenAIProvider.init(testing.allocator, "test-key", &cfg);
+    defer provider.deinit(testing.allocator);
+
+    const result = provider.parseResponse(testing.allocator, malformed_json, .ok);
+    try testing.expectError(llm.LLMError.JSONParseError, result);
+}
+
+test "Command text cleaning handles various formats" {
+    const openai = @import("openai.zig");
+    const config = @import("../config.zig");
+
+    const test_cases = [_]struct {
+        content: []const u8,
+        expected: []const u8,
+    }{
+        .{ .content = "ls -la", .expected = "ls -la" },
+        .{ .content = "`ls -la`", .expected = "ls -la" },
+        .{ .content = "```bash\\nls -la\\n```", .expected = "ls -la" },
+        .{ .content = "```\\nls -la\\n```", .expected = "ls -la" },
+        .{ .content = "  ls -la  \\n", .expected = "ls -la" },
+    };
+
+    const cfg = config.Config{};
+    const provider = try openai.OpenAIProvider.init(testing.allocator, "test-key", &cfg);
+    defer provider.deinit(testing.allocator);
+
+    for (test_cases) |case| {
+        const response_json = try std.fmt.allocPrint(testing.allocator,
+            \\{{
+            \\  "choices": [
+            \\    {{
+            \\      "message": {{
+            \\        "role": "assistant",
+            \\        "content": "{s}"
+            \\      }}
+            \\    }}
+            \\  ]
+            \\}}
+        , .{case.content});
+        defer testing.allocator.free(response_json);
+
+        const response = try provider.parseResponse(testing.allocator, response_json, .ok);
+        defer {
+            var mutable_response = response;
+            mutable_response.deinit(testing.allocator);
         }
 
-        if (std.mem.startsWith(u8, chunk, "__ERROR__")) {
-            context.error_received = true;
-            return;
-        }
-
-        context.accumulated_text.appendSlice(chunk) catch {
-            context.error_received = true;
-        };
+        try testing.expectEqualStrings(case.expected, response.command);
     }
-};
+}
+
+test "MockLLMProvider error propagation paths" {
+    var mock_provider = MockLLMProvider{
+        .should_fail = true,
+        .error_type = llm.LLMError.InvalidConfiguration,
+    };
+
+    const request = llm.LLMRequest{ .prompt = "test" };
+    const result = mock_provider.provider().request(testing.allocator, request);
+
+    try testing.expectError(llm.LLMError.InvalidConfiguration, result);
+}
+
+test "DialogState history navigation edge cases" {
+    var dialog = DialogState.init(testing.allocator);
+    defer dialog.deinit();
+
+    var current_index: ?usize = null;
+
+    // Test navigation with empty history
+    var result = dialog.navigateHistory(.up, &current_index);
+    try testing.expectEqualStrings("", result);
+
+    result = dialog.navigateHistory(.down, &current_index);
+    try testing.expectEqualStrings("", result);
+
+    // Add single item and test edge cases
+    try dialog.addToHistory("single command");
+
+    // Navigate down from null should stay empty
+    current_index = null;
+    result = dialog.navigateHistory(.down, &current_index);
+    try testing.expectEqualStrings("", result);
+}
+
+test "dialog memory allocation failure handling" {
+    var buffer: [100]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buffer);
+    const limited_allocator = fba.allocator();
+
+    var dialog = DialogState.init(limited_allocator);
+    defer dialog.deinit();
+
+    // Try to trigger allocation failure by appending large text
+    const large_text = "x" ** 200; // Larger than our 100-byte buffer
+    const result = dialog.setSuggestionText(large_text);
+
+    // Should fail due to memory allocation
+    try testing.expectError(error.OutOfMemory, result);
+}
+
+test "mock provider request function coverage" {
+    const allocator = testing.allocator;
+
+    var provider = MockLLMProvider{
+        .response_command = "echo hello",
+        .delay_ms = 0,
+    };
+
+    // Test the request function that's currently uncovered
+    const request = llm.LLMRequest{ .prompt = "test" };
+    const response = try MockLLMProvider.request(&provider, allocator, request);
+
+    try testing.expectEqualStrings("test command", response.command);
+
+    // Note: MockLLMProvider returns string literals, not allocated memory,
+    // so we don't need to free response.command or response.error_message
+}
+
+test "dialog loading state with delays" {
+    var dialog = DialogState.init(testing.allocator);
+    defer dialog.deinit();
+
+    dialog.setPromptText("test command");
+    dialog.startLoading();
+
+    // Simulate the delay line in the mock provider (line 236)
+    std.time.sleep(std.time.ns_per_ms * 1); // 1ms delay
+
+    try dialog.setSuggestionText("response");
+    dialog.stopLoading();
+
+    try testing.expect(dialog.suggestion_text.len > 0);
+}

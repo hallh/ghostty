@@ -1,0 +1,207 @@
+const std = @import("std");
+const llm = @import("../llm_assistant.zig");
+
+/// Mock LLM Provider for testing
+/// This replaces HTTP-level mocking with provider-level mocking for simpler, more reliable tests
+pub const MockLLMProvider = struct {
+    allocator: std.mem.Allocator,
+
+    // Control what the mock returns
+    response_command: ?[]const u8 = null,
+    response_error: ?[]const u8 = null,
+    error_to_return: ?llm.LLMError = null,
+    should_fail_deinit: bool = false,
+
+    // Streaming support
+    stream_chunks: []const []const u8 = &[_][]const u8{},
+    stream_error_after_chunks: ?llm.LLMError = null,
+
+    const Self = @This();
+
+    pub fn init(allocator: std.mem.Allocator) Self {
+        return Self{ .allocator = allocator };
+    }
+
+    pub fn deinit(self: *Self) void {
+        if (self.should_fail_deinit) {
+            // Could simulate cleanup issues, but usually not needed
+        }
+        // Note: We don't own the strings passed in, so no cleanup needed
+    }
+
+    /// Convert to LLMProvider interface
+    pub fn provider(self: *Self) llm.LLMProvider {
+        return llm.LLMProvider{
+            .ptr = self,
+            .vtable = &vtable,
+        };
+    }
+
+    const vtable = llm.LLMProvider.Vtable{
+        .request = request,
+        .requestStream = requestStream,
+        .deinit = deinitProvider,
+    };
+
+    fn request(ptr: *anyopaque, allocator: std.mem.Allocator, req: llm.LLMRequest) llm.LLMError!llm.LLMResponse {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+
+        _ = req; // unused
+
+        if (self.error_to_return) |err| {
+            return err;
+        }
+
+        const command = if (self.response_command) |cmd|
+            try allocator.dupe(u8, cmd)
+        else
+            try allocator.dupe(u8, "echo 'mock response'");
+
+        const error_msg = if (self.response_error) |err|
+            try allocator.dupe(u8, err)
+        else
+            null;
+
+        return llm.LLMResponse{
+            .command = command,
+            .error_message = error_msg,
+            .is_final = true,
+        };
+    }
+
+    fn requestStream(
+        ptr: *anyopaque,
+        allocator: std.mem.Allocator,
+        req: llm.LLMRequest,
+        callback: llm.StreamCallback,
+        user_data: ?*anyopaque,
+    ) llm.LLMError!void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+
+        _ = allocator; // unused
+        _ = req; // unused
+
+        if (self.error_to_return) |err| {
+            return err;
+        }
+
+        // Send stream chunks
+        for (self.stream_chunks) |chunk| {
+            callback(chunk, user_data);
+        }
+
+        // Return error after sending chunks if configured
+        if (self.stream_error_after_chunks) |err| {
+            return err;
+        }
+    }
+
+    fn deinitProvider(ptr: *anyopaque, allocator: std.mem.Allocator) void {
+        _ = allocator; // unused
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        self.deinit();
+    }
+};
+
+/// Helper function to create common mock scenarios
+pub const MockScenario = struct {
+    pub fn success(allocator: std.mem.Allocator, command: []const u8) MockLLMProvider {
+        return MockLLMProvider{
+            .allocator = allocator,
+            .response_command = command,
+        };
+    }
+
+    pub fn errorScenario(allocator: std.mem.Allocator, err: llm.LLMError) MockLLMProvider {
+        return MockLLMProvider{
+            .allocator = allocator,
+            .error_to_return = err,
+        };
+    }
+
+    pub fn streaming(allocator: std.mem.Allocator, chunks: []const []const u8) MockLLMProvider {
+        return MockLLMProvider{
+            .allocator = allocator,
+            .stream_chunks = chunks,
+        };
+    }
+
+    pub fn streamingWithError(allocator: std.mem.Allocator, chunks: []const []const u8, err: llm.LLMError) MockLLMProvider {
+        return MockLLMProvider{
+            .allocator = allocator,
+            .stream_chunks = chunks,
+            .stream_error_after_chunks = err,
+        };
+    }
+
+    pub fn outOfMemory(allocator: std.mem.Allocator) MockLLMProvider {
+        return MockLLMProvider{
+            .allocator = allocator,
+            .error_to_return = llm.LLMError.OutOfMemory,
+        };
+    }
+
+    pub fn networkError(allocator: std.mem.Allocator) MockLLMProvider {
+        return MockLLMProvider{
+            .allocator = allocator,
+            .error_to_return = llm.LLMError.NetworkError,
+        };
+    }
+
+    pub fn authError(allocator: std.mem.Allocator) MockLLMProvider {
+        return MockLLMProvider{
+            .allocator = allocator,
+            .error_to_return = llm.LLMError.AuthenticationError,
+        };
+    }
+
+    pub fn apiError(allocator: std.mem.Allocator) MockLLMProvider {
+        return MockLLMProvider{
+            .allocator = allocator,
+            .error_to_return = llm.LLMError.APIError,
+        };
+    }
+
+    pub fn rateLimitError(allocator: std.mem.Allocator) MockLLMProvider {
+        return MockLLMProvider{
+            .allocator = allocator,
+            .error_to_return = llm.LLMError.RateLimitExceeded,
+        };
+    }
+};
+
+/// Test stream context for capturing stream data
+pub const TestStreamContext = struct {
+    allocator: std.mem.Allocator,
+    accumulated_text: std.ArrayList(u8),
+    completion_received: bool = false,
+    error_received: bool = false,
+
+    const Self = @This();
+
+    pub fn init(allocator: std.mem.Allocator) Self {
+        return Self{
+            .allocator = allocator,
+            .accumulated_text = std.ArrayList(u8).init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.accumulated_text.deinit();
+    }
+
+    pub fn streamCallback(chunk: []const u8, user_data: ?*anyopaque) void {
+        if (user_data) |data| {
+            const context: *TestStreamContext = @ptrCast(@alignCast(data));
+            context.accumulated_text.appendSlice(chunk) catch {
+                context.error_received = true;
+                return;
+            };
+
+            // Simple completion detection - in real scenarios this would parse JSON
+            if (std.mem.indexOf(u8, chunk, "\"finish_reason\"") != null) {
+                context.completion_received = true;
+            }
+        }
+    }
+};

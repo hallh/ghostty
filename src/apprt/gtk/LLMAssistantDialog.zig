@@ -316,20 +316,56 @@ fn submitRequest(self: *LLMAssistantDialog) void {
         .prompt = text,
     };
 
-    // Submit streaming request
-    const stream_context = StreamContext{
-        .dialog = self,
-        .allocator = self.arena.allocator(),
-        .accumulated_text = std.ArrayList(u8).init(self.arena.allocator()),
+    // Submit blocking request in a separate thread to avoid blocking UI
+    const RequestContext = struct {
+        dialog: *LLMAssistantDialog,
+        provider: llm.LLMProvider,
+        request: llm.LLMRequest,
+        allocator: std.mem.Allocator,
     };
 
-    provider.requestStream(
-        self.arena.allocator(),
-        request,
-        onStreamChunk,
-        @constCast(&stream_context),
-    ) catch |err| {
+    const context = self.arena.allocator().create(RequestContext) catch |err| {
         self.stopLoading();
+        self.showError("Memory allocation failed");
+        log.err("Failed to allocate request context: {}", .{err});
+        return;
+    };
+
+    context.* = RequestContext{
+        .dialog = self,
+        .provider = provider,
+        .request = request,
+        .allocator = self.arena.allocator(),
+    };
+
+    // Launch request in background thread
+    const thread = std.Thread.spawn(.{}, requestInBackground, .{context}) catch |err| {
+        self.stopLoading();
+        self.arena.allocator().destroy(context);
+        self.showError("Failed to start background request");
+        log.err("Failed to spawn request thread: {}", .{err});
+        return;
+    };
+    thread.detach(); // Let it run independently
+}
+
+fn requestInBackground(context_ptr: *anyopaque) void {
+    const RequestContext = struct {
+        dialog: *LLMAssistantDialog,
+        provider: llm.LLMProvider,
+        request: llm.LLMRequest,
+        allocator: std.mem.Allocator,
+    };
+
+    const context: *RequestContext = @ptrCast(@alignCast(context_ptr));
+    defer context.allocator.destroy(context);
+
+    // Make blocking request
+    const response = context.provider.request(
+        context.allocator,
+        context.request,
+    ) catch |err| {
+        // Schedule error display in main thread
         const error_msg = switch (err) {
             llm.LLMError.InvalidConfiguration => "Configuration error",
             llm.LLMError.NetworkError => "Network error - please check your connection",
@@ -338,9 +374,104 @@ fn submitRequest(self: *LLMAssistantDialog) void {
             llm.LLMError.APIError => "API error - the service may be unavailable",
             else => "An unexpected error occurred",
         };
-        self.showError(error_msg);
-        log.err("LLM request failed: {}", .{err});
+
+        // Schedule error display in main thread
+        const error_context = context.allocator.create(ShowErrorContext) catch {
+            log.err("Failed to allocate error context", .{});
+            return;
+        };
+        error_context.* = ShowErrorContext{
+            .dialog = context.dialog,
+            .message = error_msg,
+        };
+        _ = glib.idleAdd(showRequestError, error_context);
+        return;
     };
+
+    // Schedule success handling in main thread
+    const success_context = context.allocator.create(ShowResponseContext) catch |err| {
+        log.err("Failed to allocate success context: {}", .{err});
+        var mutable_response = response;
+        mutable_response.deinit(context.allocator);
+        return;
+    };
+
+    success_context.* = ShowResponseContext{
+        .dialog = context.dialog,
+        .response = response,
+        .allocator = context.allocator,
+    };
+
+    _ = glib.idleAdd(showRequestSuccess, success_context);
+}
+
+const ShowErrorContext = struct {
+    dialog: *LLMAssistantDialog,
+    message: []const u8,
+};
+
+const ShowResponseContext = struct {
+    dialog: *LLMAssistantDialog,
+    response: llm.LLMResponse,
+    allocator: std.mem.Allocator,
+};
+
+fn showRequestError(user_data: ?*anyopaque) callconv(.c) c_int {
+    const error_context: *ShowErrorContext = @ptrCast(@alignCast(user_data.?));
+    const self = error_context.dialog;
+
+    defer {
+        // Clean up the allocated error context
+        self.arena.allocator().destroy(error_context);
+    }
+
+    self.stopLoading();
+    self.showError(error_context.message);
+
+    return 0; // Don't repeat
+}
+
+fn showRequestSuccess(user_data: ?*anyopaque) callconv(.c) c_int {
+    const success_context: *ShowResponseContext = @ptrCast(@alignCast(user_data.?));
+    const self = success_context.dialog;
+
+    defer {
+        var mutable_response = success_context.response;
+        mutable_response.deinit(success_context.allocator);
+        success_context.allocator.destroy(success_context);
+    }
+
+    self.stopLoading();
+
+    // Check for error in response
+    if (success_context.response.error_message) |error_msg| {
+        self.showError(error_msg);
+        return 0;
+    }
+
+    // Show successful response
+    if (success_context.response.command.len > 0) {
+        // Update current response
+        if (self.current_response) |old_response| {
+            self.arena.allocator().free(old_response);
+        }
+        self.current_response = self.arena.allocator().dupe(u8, success_context.response.command) catch {
+            self.showError("Failed to save response");
+            return 0;
+        };
+
+        // Update text buffer
+        self.suggestion_buffer.setText(@ptrCast(success_context.response.command.ptr), @intCast(success_context.response.command.len));
+
+        // Show suggestion UI elements
+        gtk.Widget.setVisible(self.suggestion_box.as(gtk.Widget), 1);
+        gtk.Widget.setVisible(self.clear_button.as(gtk.Widget), 1);
+        gtk.Widget.setVisible(self.accept_button.as(gtk.Widget), 1);
+    } else {
+        self.showError("No command received from LLM service");
+    }
+
+    return 0; // Don't repeat
 }
 
 fn startLoading(self: *LLMAssistantDialog) void {
@@ -466,124 +597,4 @@ fn pulsProgressBar(user_data: ?*anyopaque) callconv(.c) c_int {
     const self: *LLMAssistantDialog = @ptrCast(@alignCast(user_data.?));
     self.progress_bar.pulse();
     return @intFromBool(self.is_loading); // Continue if still loading
-}
-
-const StreamContext = struct {
-    dialog: *LLMAssistantDialog,
-    allocator: Allocator,
-    accumulated_text: std.ArrayList(u8),
-};
-
-fn onStreamChunk(chunk: []const u8, user_data: ?*anyopaque) void {
-    const context: *StreamContext = @ptrCast(@alignCast(user_data.?));
-
-    // Handle special signals from providers
-    if (std.mem.startsWith(u8, chunk, "__ERROR__")) {
-        const error_msg = chunk[9..]; // Skip "__ERROR__" prefix
-        log.err("Streaming error received: {s}", .{error_msg});
-
-        // Schedule error display in main thread
-        const error_context = context.allocator.create(ErrorContext) catch {
-            log.err("Failed to allocate error context", .{});
-            return;
-        };
-        error_context.* = ErrorContext{
-            .dialog = context.dialog,
-            .message = context.allocator.dupe(u8, error_msg) catch "Unknown streaming error",
-        };
-        _ = glib.idleAdd(showStreamingError, error_context);
-        return;
-    }
-
-    if (std.mem.eql(u8, chunk, "__COMPLETE__")) {
-        log.debug("Stream completed successfully", .{});
-        // Schedule completion handling in main thread
-        _ = glib.idleAdd(completeStreaming, @constCast(context));
-        return;
-    }
-
-    // Accumulate regular text content
-    context.accumulated_text.appendSlice(chunk) catch |err| {
-        log.warn("Failed to accumulate stream chunk: {}", .{err});
-        return;
-    };
-
-    // Update UI in main thread
-    _ = glib.idleAdd(updateSuggestionText, @constCast(context));
-}
-
-const ErrorContext = struct {
-    dialog: *LLMAssistantDialog,
-    message: []const u8,
-};
-
-fn showStreamingError(user_data: ?*anyopaque) callconv(.c) c_int {
-    const error_context: *ErrorContext = @ptrCast(@alignCast(user_data.?));
-    const self = error_context.dialog;
-
-    // Stop loading and show error
-    self.stopLoading();
-    self.showError(error_context.message);
-
-    // Clean up
-    self.arena.allocator().free(error_context.message);
-    self.arena.allocator().destroy(error_context);
-
-    return 0; // Don't repeat
-}
-
-fn completeStreaming(user_data: ?*anyopaque) callconv(.c) c_int {
-    const context: *StreamContext = @ptrCast(@alignCast(user_data.?));
-    const self = context.dialog;
-
-    // Ensure we stop loading
-    self.stopLoading();
-
-    // Show final suggestion if we have content
-    if (context.accumulated_text.items.len > 0) {
-        // Update current response
-        if (self.current_response) |old_response| {
-            self.arena.allocator().free(old_response);
-        }
-        self.current_response = self.arena.allocator().dupe(u8, context.accumulated_text.items) catch {
-            log.warn("Failed to save final response", .{});
-            return 0;
-        };
-
-        // Update text buffer
-        self.suggestion_buffer.setText(@ptrCast(context.accumulated_text.items.ptr), @intCast(context.accumulated_text.items.len));
-
-        // Show suggestion UI elements
-        gtk.Widget.setVisible(self.suggestion_box.as(gtk.Widget), 1);
-        gtk.Widget.setVisible(self.clear_button.as(gtk.Widget), 1);
-        gtk.Widget.setVisible(self.accept_button.as(gtk.Widget), 1);
-    } else {
-        self.showError("No response received from LLM service");
-    }
-
-    return 0; // Don't repeat
-}
-
-fn updateSuggestionText(user_data: ?*anyopaque) callconv(.c) c_int {
-    const context: *StreamContext = @ptrCast(@alignCast(user_data.?));
-    const self = context.dialog;
-
-    // Update current response
-    if (self.current_response) |old_response| {
-        self.arena.allocator().free(old_response);
-    }
-    self.current_response = self.arena.allocator().dupe(u8, context.accumulated_text.items) catch |err| {
-        log.warn("Failed to update current response: {}", .{err});
-        return 0;
-    };
-
-    // Update text buffer with incremental content
-    self.suggestion_buffer.setText(@ptrCast(context.accumulated_text.items.ptr), @intCast(context.accumulated_text.items.len));
-
-    // Show suggestion UI elements (but keep loading until explicit completion)
-    gtk.Widget.setVisible(self.suggestion_box.as(gtk.Widget), 1);
-    gtk.Widget.setVisible(self.clear_button.as(gtk.Widget), 1);
-    gtk.Widget.setVisible(self.accept_button.as(gtk.Widget), 1);
-
-    return 0; // Don't repeat
 }
