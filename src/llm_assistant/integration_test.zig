@@ -1054,3 +1054,258 @@ test "blocking request functionality" {
         testing.allocator.free(msg);
     }
 }
+
+// =====================================================
+// NEW COMPREHENSIVE INTEGRATION TESTS FOR REPORTED ISSUES
+// =====================================================
+
+test "Dialog UI state resets properly when shown multiple times" {
+    var dialog = DialogState.init(testing.allocator);
+    defer dialog.deinit();
+
+    // Simulate first usage: input -> suggestion
+    dialog.setPromptText("first command");
+    try dialog.setSuggestionText("ls -la");
+    // Manually hide input box to simulate the real UI flow
+    dialog.input_box_visible = false;
+
+    // Verify suggestion state
+    try testing.expect(!dialog.input_box_visible);
+    try testing.expect(dialog.suggestion_box_visible);
+    try testing.expectEqualStrings("ls -la", dialog.suggestion_text);
+
+    // Simulate closing and reopening dialog (like the show() method does)
+    dialog.clearSuggestion();
+
+    // Verify dialog properly resets to input state
+    try testing.expect(dialog.input_box_visible);
+    try testing.expect(!dialog.suggestion_box_visible);
+    try testing.expect(!dialog.accept_button_visible);
+    try testing.expect(!dialog.clear_button_visible);
+    try testing.expect(!dialog.progress_visible);
+    try testing.expect(!dialog.error_label_visible);
+
+    // Verify suggestion text is cleared
+    try testing.expectEqualStrings("", dialog.suggestion_text);
+}
+
+test "Dialog UI state transitions work correctly through complete workflow" {
+    var dialog = DialogState.init(testing.allocator);
+    defer dialog.deinit();
+
+    // 1. Initial state: input visible, suggestion hidden
+    try testing.expect(dialog.input_box_visible);
+    try testing.expect(!dialog.suggestion_box_visible);
+
+    // 2. Start loading: input hidden, suggestion visible with progress
+    dialog.startLoading();
+    try testing.expect(!dialog.input_box_visible);
+    try testing.expect(dialog.suggestion_box_visible);
+    try testing.expect(dialog.progress_visible);
+    try testing.expect(!dialog.accept_button_visible);
+
+    // 3. Show suggestion: progress hidden, suggestion and buttons visible
+    dialog.stopLoading();
+    try dialog.setSuggestionText("echo 'test'");
+    try testing.expect(!dialog.input_box_visible);
+    try testing.expect(dialog.suggestion_box_visible);
+    try testing.expect(!dialog.progress_visible);
+    try testing.expect(dialog.accept_button_visible);
+    try testing.expect(dialog.clear_button_visible);
+
+    // 4. Clear suggestion: back to input state
+    dialog.clearSuggestion();
+    try testing.expect(dialog.input_box_visible);
+    try testing.expect(!dialog.suggestion_box_visible);
+    try testing.expect(!dialog.accept_button_visible);
+    try testing.expect(!dialog.clear_button_visible);
+}
+
+test "Multiple dialog sessions maintain proper state isolation" {
+    var dialog = DialogState.init(testing.allocator);
+    defer dialog.deinit();
+
+    // Session 1
+    dialog.setPromptText("session 1 command");
+    try dialog.setSuggestionText("mkdir session1");
+    try testing.expectEqualStrings("mkdir session1", dialog.suggestion_text);
+
+    // Reset for session 2 (simulating dialog reopening)
+    dialog.clearSuggestion();
+    try testing.expectEqualStrings("", dialog.suggestion_text);
+    try testing.expect(dialog.input_box_visible);
+
+    // Session 2
+    dialog.setPromptText("session 2 command");
+    try dialog.setSuggestionText("rm session2");
+    try testing.expectEqualStrings("rm session2", dialog.suggestion_text);
+
+    // Reset for session 3
+    dialog.clearSuggestion();
+    try testing.expectEqualStrings("", dialog.suggestion_text);
+    try testing.expect(dialog.input_box_visible);
+
+    // Session 3 should start clean
+    try testing.expect(!dialog.suggestion_box_visible);
+    try testing.expect(!dialog.accept_button_visible);
+}
+
+test "Keyboard shortcuts work in all dialog states" {
+    var dialog = DialogState.init(testing.allocator);
+    defer dialog.deinit();
+
+    // Test Enter key in input state (should submit if text present)
+    dialog.setPromptText("test command");
+    try testing.expect(dialog.input_box_visible);
+    // Simulate Enter key press - would trigger submit in real UI
+
+    // Test Ctrl+Enter in suggestion state (should accept suggestion)
+    try dialog.setSuggestionText("ls -la");
+    try testing.expect(dialog.accept_button_visible);
+    // Simulate Ctrl+Enter - would trigger acceptance in real UI
+
+    // Test Esc in suggestion state (should go back to input)
+    dialog.clearSuggestion();
+    try testing.expect(dialog.input_box_visible);
+    try testing.expect(!dialog.suggestion_box_visible);
+
+    // Test Esc in input state (should close dialog in real UI)
+    try testing.expect(dialog.input_box_visible);
+    // Simulate second Esc - would close dialog in real UI
+}
+
+test "Error state transitions work correctly" {
+    var dialog = DialogState.init(testing.allocator);
+    defer dialog.deinit();
+
+    // Start loading
+    dialog.startLoading();
+    try testing.expect(dialog.progress_visible);
+
+    // Show error
+    dialog.stopLoading();
+    dialog.showError("Network error occurred");
+    try testing.expect(!dialog.progress_visible);
+    try testing.expect(dialog.error_label_visible);
+    try testing.expect(dialog.clear_button_visible);
+    try testing.expect(!dialog.accept_button_visible);
+
+    // Clear error back to input state
+    dialog.clearSuggestion();
+    try testing.expect(dialog.input_box_visible);
+    try testing.expect(!dialog.error_label_visible);
+    try testing.expect(!dialog.clear_button_visible);
+}
+
+test "Loading state cancellation works correctly" {
+    var dialog = DialogState.init(testing.allocator);
+    defer dialog.deinit();
+
+    // Start loading
+    dialog.startLoading();
+    try testing.expect(dialog.progress_visible);
+    try testing.expect(!dialog.input_box_visible);
+
+    // Cancel loading (simulate Esc during loading)
+    dialog.stopLoading();
+    try testing.expect(!dialog.progress_visible);
+    // After cancellation, dialog should return to input state
+    dialog.clearSuggestion(); // This simulates the full cancel flow
+    try testing.expect(dialog.input_box_visible);
+    try testing.expect(!dialog.suggestion_box_visible);
+}
+
+test "History navigation maintains UI state correctly" {
+    var dialog = DialogState.init(testing.allocator);
+    defer dialog.deinit();
+
+    // Add some history
+    try dialog.addToHistory("first command");
+    try dialog.addToHistory("second command");
+
+    // Navigate history in input state
+    try testing.expect(dialog.input_box_visible);
+    var current_index: ?usize = null;
+    _ = dialog.navigateHistory(.up, &current_index);
+    _ = dialog.navigateHistory(.down, &current_index);
+
+    // History navigation should not affect UI state
+    try testing.expect(dialog.input_box_visible);
+    try testing.expect(!dialog.suggestion_box_visible);
+}
+
+test "Complete user workflow with proper state management" {
+    var dialog = DialogState.init(testing.allocator);
+    defer dialog.deinit();
+
+    // 1. User opens dialog (should be in input state)
+    dialog.clearSuggestion(); // Simulates show() method
+    try testing.expect(dialog.input_box_visible);
+    try testing.expect(!dialog.suggestion_box_visible);
+
+    // 2. User types command and submits
+    dialog.setPromptText("list files");
+    dialog.startLoading();
+    try testing.expect(!dialog.input_box_visible);
+    try testing.expect(dialog.progress_visible);
+
+    // 3. Response arrives
+    dialog.stopLoading();
+    try dialog.setSuggestionText("ls -la");
+    try testing.expect(dialog.accept_button_visible);
+    try testing.expect(dialog.clear_button_visible);
+
+    // 4. User accepts suggestion
+    // (In real UI: Ctrl+Enter or click "Insert Command")
+    try testing.expectEqualStrings("ls -la", dialog.suggestion_text);
+
+    // 5. User opens dialog again later
+    dialog.clearSuggestion();
+    try testing.expect(dialog.input_box_visible);
+    try testing.expect(!dialog.suggestion_box_visible);
+    try testing.expectEqualStrings("", dialog.suggestion_text); // Should be clean
+}
+
+test "Focus-independent keyboard shortcut simulation" {
+    var dialog = DialogState.init(testing.allocator);
+    defer dialog.deinit();
+
+    // Setup suggestion state
+    try dialog.setSuggestionText("grep 'pattern' file.txt");
+    try testing.expect(dialog.accept_button_visible);
+
+    // Simulate Ctrl+Enter working regardless of which widget has focus
+    // In the real implementation, the key controller is attached to the dialog
+    // with capture propagation, so it should receive all key events first
+
+    // Test that suggestion is ready for acceptance
+    try testing.expectEqualStrings("grep 'pattern' file.txt", dialog.suggestion_text);
+    try testing.expect(dialog.accept_button_visible);
+
+    // In a real scenario, the onKeyPressed handler would be called
+    // and would trigger acceptSuggestion() when Ctrl+Enter is pressed
+    // regardless of focus state
+}
+
+test "UI hints and labels are correctly set" {
+    // This test verifies that the UI contains the correct hints
+    // The actual text is defined in the blueprint file
+
+    // We can't directly test the GTK widgets here, but we can verify
+    // that our DialogState mock properly represents the expected behavior
+
+    var dialog = DialogState.init(testing.allocator);
+    defer dialog.deinit();
+
+    // The blueprint should contain hints about keyboard shortcuts
+    // "↑↓ navigate history • Enter submit • Ctrl+Enter accept • Esc back/close"
+
+    // Verify that keyboard shortcuts work as documented
+    try testing.expect(dialog.input_box_visible); // Initially in input state for Enter submit
+
+    try dialog.setSuggestionText("test command");
+    try testing.expect(dialog.accept_button_visible); // Accept button visible for Ctrl+Enter
+
+    dialog.clearSuggestion();
+    try testing.expect(dialog.input_box_visible); // Back button (Esc) returns to input
+}

@@ -74,6 +74,8 @@ pub fn init(self: *LLMAssistantDialog, window: *Window) !void {
     // Add key controller for keyboard shortcuts
     const ec_key = gtk.EventControllerKey.new();
     errdefer ec_key.unref();
+    // Set propagation phase to capture to ensure we get events before child widgets
+    ec_key.as(gtk.EventController).setPropagationPhase(.capture);
     self.dialog.getChild().?.addController(ec_key.as(gtk.EventController));
 
     // Connect signals
@@ -206,8 +208,11 @@ fn resetDialog(self: *LLMAssistantDialog) void {
         gtk.Editable.setText(self.prompt_entry.as(gtk.Editable), "");
     }
 
-    // Reset suggestion display
+    // Show input section and hide suggestion section
+    gtk.Widget.setVisible(self.input_box.as(gtk.Widget), 1);
     gtk.Widget.setVisible(self.suggestion_box.as(gtk.Widget), 0);
+
+    // Reset suggestion display
     self.suggestion_buffer.setText("", 0);
     gtk.Widget.setVisible(self.progress_bar.as(gtk.Widget), 0);
     gtk.Widget.setVisible(self.error_label.as(gtk.Widget), 0);
