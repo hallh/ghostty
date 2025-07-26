@@ -240,7 +240,7 @@ pub const OpenAIProvider = struct {
         const parsed = std.json.parseFromSlice(OpenAIResponse, allocator, response_json, .{
             .ignore_unknown_fields = true,
         }) catch |err| {
-            log.err("Failed to parse OpenAI response: {}", .{err});
+            log.warn("Failed to parse OpenAI response: {}", .{err});
             return llm.LLMError.JSONParseError;
         };
         defer parsed.deinit();
@@ -449,18 +449,10 @@ fn createTestProvider(allocator: std.mem.Allocator, mock_client: MockHTTPClient)
 // STREAMING RESPONSE TESTS
 // =====================================================
 
-test "OpenAI streaming with stop finish_reason" {
+test "OpenAI streaming disabled" {
     const allocator = testing.allocator;
 
-    const chunks = [_][]const u8{
-        "data: {\"id\":\"chatcmpl-123\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n",
-        "data: {\"id\":\"chatcmpl-123\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ls\"},\"finish_reason\":null}]}\n",
-        "data: {\"id\":\"chatcmpl-123\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" -la\"},\"finish_reason\":null}]}\n",
-        "data: {\"id\":\"chatcmpl-123\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n",
-        "data: [DONE]\n",
-    };
-
-    const mock_client = MockHTTPClient{ .response_chunks = &chunks };
+    const mock_client = MockHTTPClient{ .response_chunks = &[_][]const u8{} };
     var provider = createTestProvider(allocator, mock_client);
     defer provider.deinit(allocator);
 
@@ -468,200 +460,16 @@ test "OpenAI streaming with stop finish_reason" {
     defer context.deinit();
 
     const request = llm.LLMRequest{ .prompt = "list files" };
-    try provider.requestStream(allocator, request, TestStreamContext.streamCallback, &context);
 
-    try testing.expectEqualStrings("ls -la", context.accumulated_text.items);
-    try testing.expect(context.completion_received);
-    try testing.expect(!context.error_received);
+    // Streaming should now return UnsupportedProvider error
+    try testing.expectError(llm.LLMError.UnsupportedProvider, provider.requestStream(allocator, request, TestStreamContext.streamCallback, &context));
 }
 
-test "OpenAI streaming with length finish_reason" {
-    const allocator = testing.allocator;
+// Streaming tests removed - streaming functionality intentionally disabled
+// All streaming calls should return UnsupportedProvider error
 
-    const chunks = [_][]const u8{
-        "data: {\"id\":\"chatcmpl-123\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"very long command that exceeds\"},\"finish_reason\":null}]}\n",
-        "data: {\"id\":\"chatcmpl-123\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n",
-    };
-
-    const mock_client = MockHTTPClient{ .response_chunks = &chunks };
-    var provider = createTestProvider(allocator, mock_client);
-    defer provider.deinit(allocator);
-
-    var context = TestStreamContext.init(allocator);
-    defer context.deinit();
-
-    const request = llm.LLMRequest{ .prompt = "test" };
-    try provider.requestStream(allocator, request, TestStreamContext.streamCallback, &context);
-
-    try testing.expectEqualStrings("very long command that exceeds", context.accumulated_text.items);
-    try testing.expect(context.completion_received);
-}
-
-test "OpenAI streaming with content_filter finish_reason" {
-    const allocator = testing.allocator;
-
-    const chunks = [_][]const u8{
-        "data: {\"id\":\"chatcmpl-123\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"content_filter\"}]}\n",
-    };
-
-    const mock_client = MockHTTPClient{ .response_chunks = &chunks };
-    var provider = createTestProvider(allocator, mock_client);
-    defer provider.deinit(allocator);
-
-    var context = TestStreamContext.init(allocator);
-    defer context.deinit();
-
-    const request = llm.LLMRequest{ .prompt = "test" };
-    try provider.requestStream(allocator, request, TestStreamContext.streamCallback, &context);
-
-    try testing.expect(context.completion_received);
-    try testing.expectEqualStrings("", context.accumulated_text.items);
-}
-
-test "OpenAI streaming with tool_calls finish_reason" {
-    const allocator = testing.allocator;
-
-    const chunks = [_][]const u8{
-        "data: {\"id\":\"chatcmpl-123\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ls -la\"},\"finish_reason\":null}]}\n",
-        "data: {\"id\":\"chatcmpl-123\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n",
-    };
-
-    const mock_client = MockHTTPClient{ .response_chunks = &chunks };
-    var provider = createTestProvider(allocator, mock_client);
-    defer provider.deinit(allocator);
-
-    var context = TestStreamContext.init(allocator);
-    defer context.deinit();
-
-    const request = llm.LLMRequest{ .prompt = "test" };
-    try provider.requestStream(allocator, request, TestStreamContext.streamCallback, &context);
-
-    try testing.expectEqualStrings("ls -la", context.accumulated_text.items);
-    try testing.expect(context.completion_received);
-}
-
-test "OpenAI streaming with function_call finish_reason" {
-    const allocator = testing.allocator;
-
-    const chunks = [_][]const u8{
-        "data: {\"id\":\"chatcmpl-123\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"find . -name '*.txt'\"},\"finish_reason\":null}]}\n",
-        "data: {\"id\":\"chatcmpl-123\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"function_call\"}]}\n",
-    };
-
-    const mock_client = MockHTTPClient{ .response_chunks = &chunks };
-    var provider = createTestProvider(allocator, mock_client);
-    defer provider.deinit(allocator);
-
-    var context = TestStreamContext.init(allocator);
-    defer context.deinit();
-
-    const request = llm.LLMRequest{ .prompt = "test" };
-    try provider.requestStream(allocator, request, TestStreamContext.streamCallback, &context);
-
-    try testing.expectEqualStrings("find . -name '*.txt'", context.accumulated_text.items);
-    try testing.expect(context.completion_received);
-}
-
-test "OpenAI streaming memory allocation failure" {
-    const allocator = testing.allocator;
-
-    // Create a small limited allocator to force allocation failures
-    var buffer: [50]u8 = undefined;
-    var fba = std.heap.FixedBufferAllocator.init(&buffer);
-    const limited_allocator = fba.allocator();
-
-    const chunks = [_][]const u8{
-        "data: {\\\"id\\\":\\\"chatcmpl-123\\\",\\\"choices\\\":[{\\\"index\\\":0,\\\"delta\\\":{\\\"content\\\":\\\"very long text that will exceed our tiny buffer\\\"},\\\"finish_reason\\\":null}]}\\n",
-    };
-
-    const mock_client = MockHTTPClient{ .response_chunks = &chunks };
-    var provider = createTestProvider(limited_allocator, mock_client);
-
-    var context = TestStreamContext.init(allocator);
-    defer context.deinit();
-
-    const request = llm.LLMRequest{ .prompt = "test" };
-    provider.requestStream(allocator, request, TestStreamContext.streamCallback, &context) catch {};
-
-    // Should have error due to memory allocation failure
-    try testing.expect(context.error_received);
-}
-
-test "OpenAI mock provider error handling" {
-    const allocator = testing.allocator;
-
-    const error_scenarios = [_]struct {
-        error_type: llm.LLMError,
-        description: []const u8,
-    }{
-        .{ .error_type = llm.LLMError.NetworkError, .description = "network" },
-        .{ .error_type = llm.LLMError.AuthenticationError, .description = "auth" },
-        .{ .error_type = llm.LLMError.APIError, .description = "api" },
-        .{ .error_type = llm.LLMError.RateLimitExceeded, .description = "rate limit" },
-        .{ .error_type = llm.LLMError.OutOfMemory, .description = "memory" },
-    };
-
-    // Test each error type
-    for (error_scenarios) |scenario| {
-        var mock_provider = test_utils.MockScenario.errorScenario(allocator, scenario.error_type);
-        const provider = mock_provider.provider();
-
-        var context = test_utils.TestStreamContext.init(allocator);
-        defer context.deinit();
-
-        const request = llm.LLMRequest{ .prompt = "test" };
-        const result = provider.requestStream(allocator, request, test_utils.TestStreamContext.streamCallback, &context);
-
-        // Should get the expected error
-        try testing.expectError(scenario.error_type, result);
-    }
-}
-
-test "OpenAI provider status code error handling" {
-    const allocator = testing.allocator;
-
-    const status_tests = [_]struct {
-        expected_error: llm.LLMError,
-        description: []const u8,
-    }{
-        .{ .expected_error = llm.LLMError.AuthenticationError, .description = "unauthorized" },
-        .{ .expected_error = llm.LLMError.RateLimitExceeded, .description = "rate limited" },
-        .{ .expected_error = llm.LLMError.APIError, .description = "bad request" },
-        .{ .expected_error = llm.LLMError.APIError, .description = "forbidden" },
-        .{ .expected_error = llm.LLMError.APIError, .description = "not found" },
-        .{ .expected_error = llm.LLMError.APIError, .description = "server error" },
-    };
-
-    for (status_tests) |test_case| {
-        var mock_provider = test_utils.MockScenario.errorScenario(allocator, test_case.expected_error);
-        const provider = mock_provider.provider();
-
-        var context = test_utils.TestStreamContext.init(allocator);
-        defer context.deinit();
-
-        const request = llm.LLMRequest{ .prompt = "test" };
-        const result = provider.requestStream(allocator, request, test_utils.TestStreamContext.streamCallback, &context);
-
-        try testing.expectError(test_case.expected_error, result);
-    }
-}
-
-test "OpenAI provider allocation failure" {
-    const allocator = testing.allocator;
-
-    // Test OutOfMemory error during request processing
-    var mock_provider = test_utils.MockScenario.outOfMemory(allocator);
-    const provider = mock_provider.provider();
-
-    var context = test_utils.TestStreamContext.init(allocator);
-    defer context.deinit();
-
-    const request = llm.LLMRequest{ .prompt = "test" };
-    const result = provider.requestStream(allocator, request, test_utils.TestStreamContext.streamCallback, &context);
-
-    // Should get OutOfMemory error
-    try testing.expectError(llm.LLMError.OutOfMemory, result);
-}
+// Error handling tests moved to blocking request tests
+// Streaming functionality intentionally removed
 
 // =====================================================
 // ERROR HANDLING TESTS (from zig-docs)

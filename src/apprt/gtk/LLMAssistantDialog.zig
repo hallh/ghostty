@@ -22,6 +22,7 @@ arena: std.heap.ArenaAllocator,
 
 // UI elements
 dialog: *adw.Dialog,
+input_box: *gtk.Box,
 prompt_entry: *gtk.Entry,
 submit_button: *gtk.Button,
 cancel_button: *gtk.Button,
@@ -49,6 +50,7 @@ pub fn init(self: *LLMAssistantDialog, window: *Window) !void {
         .window = window,
         .arena = .init(window.app.core_app.alloc),
         .dialog = builder.getObject(adw.Dialog, "llm-assistant-dialog").?,
+        .input_box = builder.getObject(gtk.Box, "input-box").?,
         .prompt_entry = builder.getObject(gtk.Entry, "prompt-entry").?,
         .submit_button = builder.getObject(gtk.Button, "submit-button").?,
         .cancel_button = builder.getObject(gtk.Button, "cancel-button").?,
@@ -246,7 +248,7 @@ fn onKeyPressed(
     _: *gtk.EventControllerKey,
     keyval: c_uint,
     _: c_uint,
-    _: gdk.ModifierType,
+    mods: gdk.ModifierType,
     self: *LLMAssistantDialog,
 ) callconv(.c) c_int {
     switch (keyval) {
@@ -257,6 +259,18 @@ fn onKeyPressed(
         gdk.KEY_Down => {
             self.navigateHistory(.next);
             return 1; // TRUE - event handled
+        },
+        gdk.KEY_Return, gdk.KEY_KP_Enter => {
+            // Check for Ctrl+Enter to accept suggestion
+            if (mods.control_mask) {
+                if (gtk.Widget.getVisible(self.suggestion_box.as(gtk.Widget)) != 0 and
+                    gtk.Widget.getVisible(self.accept_button.as(gtk.Widget)) != 0)
+                {
+                    self.acceptSuggestion();
+                    return 1; // TRUE - event handled
+                }
+            }
+            return 0; // FALSE - let normal enter handling proceed
         },
         gdk.KEY_Escape => {
             if (self.is_loading) {
@@ -476,10 +490,9 @@ fn showRequestSuccess(user_data: ?*anyopaque) callconv(.c) c_int {
 
 fn startLoading(self: *LLMAssistantDialog) void {
     self.is_loading = true;
-    self.submit_button.setLabel(i18n._("Cancel"));
-    gtk.Widget.setSensitive(self.submit_button.as(gtk.Widget), 1);
 
-    // Show suggestion area with progress
+    // Hide input section and show suggestion area with progress
+    gtk.Widget.setVisible(self.input_box.as(gtk.Widget), 0);
     gtk.Widget.setVisible(self.suggestion_box.as(gtk.Widget), 1);
     gtk.Widget.setVisible(self.progress_bar.as(gtk.Widget), 1);
     gtk.Widget.setVisible(self.error_label.as(gtk.Widget), 0);
@@ -492,9 +505,6 @@ fn startLoading(self: *LLMAssistantDialog) void {
 
 fn stopLoading(self: *LLMAssistantDialog) void {
     self.is_loading = false;
-    self.submit_button.setLabel(i18n._("Get Suggestion"));
-    const entry_text = std.mem.span(gtk.Editable.getText(self.prompt_entry.as(gtk.Editable)));
-    gtk.Widget.setSensitive(self.submit_button.as(gtk.Widget), @intFromBool(entry_text.len > 0));
 
     // Stop progress animation
     gtk.Widget.setVisible(self.progress_bar.as(gtk.Widget), 0);
@@ -519,21 +529,52 @@ fn showError(self: *LLMAssistantDialog, message: []const u8) void {
 }
 
 fn clearSuggestion(self: *LLMAssistantDialog) void {
+    // Hide suggestion section and show input section again
     gtk.Widget.setVisible(self.suggestion_box.as(gtk.Widget), 0);
+    gtk.Widget.setVisible(self.input_box.as(gtk.Widget), 1);
     self.resetDialog();
 }
 
 fn acceptSuggestion(self: *LLMAssistantDialog) void {
     if (self.current_response) |response| {
-        // Send the command to the terminal
-        _ = self.window.notebook.currentTab() orelse return;
-        // TODO: Implement command insertion into terminal
-        // For now, just copy to clipboard as fallback
-        const display = gdk.Display.getDefault() orelse return;
-        const clipboard = gdk.Display.getClipboard(display);
-        gdk.Clipboard.setText(clipboard, @ptrCast(response.ptr));
+        // Get the current tab/surface and send the command
+        if (self.window.notebook.currentTab()) |tab| {
+            // Convert to null-terminated string for the paste operation
+            const alloc = self.arena.allocator();
+            const command_z = alloc.dupeZ(u8, response) catch {
+                log.err("Failed to allocate memory for command insertion", .{});
+                return;
+            };
+            defer alloc.free(command_z);
 
-        log.info("Command copied to clipboard: {s}", .{response});
+            // Get the active surface from the tab
+            const surface = tab.focus_child orelse switch (tab.elem) {
+                .surface => |s| s,
+                .split => null, // No focused surface, can't determine which one to send to
+            };
+
+            if (surface) |s| {
+                // Use the surface's paste mechanism to insert the command
+                s.core_surface.completeClipboardRequest(.paste, command_z, false) catch |err| {
+                    log.err("Failed to insert command into terminal: {}", .{err});
+                    // Fallback: copy to clipboard
+                    const display = gdk.Display.getDefault() orelse return;
+                    const clipboard = gdk.Display.getClipboard(display);
+                    gdk.Clipboard.setText(clipboard, @ptrCast(response.ptr));
+                    log.info("Command copied to clipboard as fallback: {s}", .{response});
+                    return;
+                };
+
+                log.info("Command inserted into terminal: {s}", .{response});
+            } else {
+                log.warn("No active surface found to insert command", .{});
+                // Fallback: copy to clipboard
+                const display = gdk.Display.getDefault() orelse return;
+                const clipboard = gdk.Display.getClipboard(display);
+                gdk.Clipboard.setText(clipboard, @ptrCast(response.ptr));
+                log.info("Command copied to clipboard as fallback: {s}", .{response});
+            }
+        }
     }
 
     _ = self.dialog.close();

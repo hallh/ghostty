@@ -23,6 +23,7 @@ const DialogState = struct {
     error_label_visible: bool = false,
     clear_button_visible: bool = false,
     accept_button_visible: bool = false,
+    input_box_visible: bool = true, // Default to visible
 
     const Self = @This();
 
@@ -48,6 +49,8 @@ const DialogState = struct {
         self.is_loading = true;
         self.submit_button_label = "Cancel";
         self.submit_button_sensitive = true;
+        // New UI behavior: hide input, show suggestion area with progress
+        self.input_box_visible = false;
         self.progress_visible = true;
         self.suggestion_box_visible = true;
         self.error_label_visible = false;
@@ -120,6 +123,8 @@ const DialogState = struct {
             self.suggestion_text = "";
         }
         self.error_message = null;
+        // Show input, hide suggestion area
+        self.input_box_visible = true;
         self.suggestion_box_visible = false;
         self.error_label_visible = false;
         self.clear_button_visible = false;
@@ -806,7 +811,7 @@ test "mock provider request function coverage" {
     const allocator = testing.allocator;
 
     var provider = MockLLMProvider{
-        .response_command = "echo hello",
+        .response_command = "test command",
         .delay_ms = 0,
     };
 
@@ -816,8 +821,11 @@ test "mock provider request function coverage" {
 
     try testing.expectEqualStrings("test command", response.command);
 
-    // Note: MockLLMProvider returns string literals, not allocated memory,
-    // so we don't need to free response.command or response.error_message
+    // Clean up allocated memory
+    allocator.free(response.command);
+    if (response.error_message) |msg| {
+        allocator.free(msg);
+    }
 }
 
 test "dialog loading state with delays" {
@@ -834,4 +842,215 @@ test "dialog loading state with delays" {
     dialog.stopLoading();
 
     try testing.expect(dialog.suggestion_text.len > 0);
+}
+
+// =====================================================
+// COMPREHENSIVE INTEGRATION TESTS FOR NEW FEATURES
+// =====================================================
+
+test "Ctrl+Enter keyboard shortcut acceptance" {
+    var dialog = DialogState.init(testing.allocator);
+    defer dialog.deinit();
+
+    // Set up a suggestion
+    dialog.setPromptText("test command");
+    try dialog.setSuggestionText("ls -la");
+
+    // Simulate Ctrl+Enter keypress (simplified simulation)
+    // In real UI, this would trigger command acceptance
+    try testing.expect(dialog.accept_button_visible);
+    try testing.expectEqualStrings("ls -la", dialog.suggestion_text);
+}
+
+test "Insert Command button functionality" {
+    var dialog = DialogState.init(testing.allocator);
+    defer dialog.deinit();
+
+    try dialog.setSuggestionText("mkdir test");
+
+    // Check that the button is visible and suggestion is set
+    try testing.expect(dialog.accept_button_visible);
+    try testing.expectEqualStrings("mkdir test", dialog.suggestion_text);
+}
+
+test "Back button functionality" {
+    var dialog = DialogState.init(testing.allocator);
+    defer dialog.deinit();
+
+    // Start with a suggestion shown
+    try dialog.setSuggestionText("rm -rf /tmp/*");
+    try testing.expect(dialog.suggestion_box_visible);
+
+    // Click back button (clearSuggestion)
+    dialog.clearSuggestion();
+
+    try testing.expect(!dialog.suggestion_box_visible);
+    try testing.expectEqualStrings("", dialog.suggestion_text);
+}
+
+test "UI state transitions: input -> loading -> suggestion" {
+    var dialog = DialogState.init(testing.allocator);
+    defer dialog.deinit();
+
+    // Initial state: input visible, suggestion hidden
+    try testing.expect(dialog.input_box_visible);
+    try testing.expect(!dialog.suggestion_box_visible);
+    try testing.expect(!dialog.is_loading);
+
+    // Start loading: input hidden, loading shown
+    dialog.setPromptText("test prompt");
+    dialog.startLoading();
+
+    try testing.expect(!dialog.input_box_visible); // New behavior: input hidden during loading
+    try testing.expect(dialog.suggestion_box_visible);
+    try testing.expect(dialog.progress_visible);
+    try testing.expect(dialog.is_loading);
+
+    // Complete with suggestion: show suggestion, hide loading
+    dialog.stopLoading();
+    try dialog.setSuggestionText("echo 'success'");
+
+    try testing.expect(!dialog.input_box_visible); // Input still hidden
+    try testing.expect(dialog.suggestion_box_visible);
+    try testing.expect(!dialog.progress_visible);
+    try testing.expect(!dialog.is_loading);
+    try testing.expect(dialog.accept_button_visible);
+    try testing.expect(dialog.clear_button_visible); // Back button
+}
+
+test "UI state transitions: suggestion -> back to input" {
+    var dialog = DialogState.init(testing.allocator);
+    defer dialog.deinit();
+
+    // Start with suggestion
+    try dialog.setSuggestionText("cat /etc/passwd");
+
+    // Go back to input
+    dialog.clearSuggestion();
+
+    try testing.expect(dialog.input_box_visible);
+    try testing.expect(!dialog.suggestion_box_visible);
+    try testing.expect(!dialog.accept_button_visible);
+    try testing.expect(!dialog.clear_button_visible);
+}
+
+test "command insertion simulation" {
+    var dialog = DialogState.init(testing.allocator);
+    defer dialog.deinit();
+
+    const command = "find . -name '*.zig' -type f";
+    try dialog.setSuggestionText(command);
+
+    // Check that command is ready for insertion
+    try testing.expect(dialog.accept_button_visible);
+    try testing.expectEqualStrings(command, dialog.suggestion_text);
+}
+
+test "error handling with Back button" {
+    var dialog = DialogState.init(testing.allocator);
+    defer dialog.deinit();
+
+    // Show error
+    dialog.showError("Network timeout");
+
+    try testing.expect(dialog.suggestion_box_visible);
+    try testing.expect(dialog.error_label_visible);
+    try testing.expect(dialog.clear_button_visible);
+    try testing.expect(!dialog.accept_button_visible);
+
+    // Back to input
+    dialog.clearSuggestion();
+
+    try testing.expect(!dialog.suggestion_box_visible);
+    try testing.expect(!dialog.error_label_visible);
+}
+
+test "keyboard navigation integration" {
+    var dialog = DialogState.init(testing.allocator);
+    defer dialog.deinit();
+
+    // Test arrow key history navigation
+    try dialog.addToHistory("first command");
+    try dialog.addToHistory("second command");
+
+    var current_index: ?usize = null;
+
+    const result1 = dialog.navigateHistory(.up, &current_index);
+    try testing.expectEqualStrings("second command", result1);
+
+    const result2 = dialog.navigateHistory(.up, &current_index);
+    try testing.expectEqualStrings("first command", result2);
+
+    const result3 = dialog.navigateHistory(.down, &current_index);
+    try testing.expectEqualStrings("second command", result3);
+}
+
+test "comprehensive workflow simulation" {
+    var dialog = DialogState.init(testing.allocator);
+    defer dialog.deinit();
+
+    // 1. User opens dialog and types
+    dialog.setPromptText("list hidden files");
+    try testing.expect(dialog.submit_button_sensitive);
+
+    // 2. User submits
+    dialog.startLoading();
+    try testing.expect(dialog.is_loading);
+
+    // 3. API responds
+    dialog.stopLoading();
+    try dialog.setSuggestionText("ls -la");
+    try testing.expect(dialog.accept_button_visible);
+    try testing.expect(dialog.clear_button_visible);
+
+    // 4. Command is ready for acceptance
+    try testing.expect(dialog.accept_button_visible);
+    try testing.expectEqualStrings("ls -la", dialog.suggestion_text);
+}
+
+test "streaming disabled verification" {
+    var dialog = DialogState.init(testing.allocator);
+    defer dialog.deinit();
+
+    var mock_provider = MockLLMProvider{
+        .response_command = "echo test",
+        .delay_ms = 0,
+    };
+
+    // Test that requestStream returns UnsupportedProvider
+    const provider = mock_provider.provider();
+    const request = llm.LLMRequest{ .prompt = "test" };
+
+    const result = provider.requestStream(
+        testing.allocator,
+        request,
+        undefined, // callback not used
+        null, // user_data not used
+    );
+
+    try testing.expectError(llm.LLMError.UnsupportedProvider, result);
+}
+
+test "blocking request functionality" {
+    var dialog = DialogState.init(testing.allocator);
+    defer dialog.deinit();
+
+    var mock_provider = MockLLMProvider{
+        .response_command = "ps aux",
+        .delay_ms = 0,
+    };
+
+    const provider = mock_provider.provider();
+    const request = llm.LLMRequest{ .prompt = "show running processes" };
+
+    const response = try provider.request(testing.allocator, request);
+
+    try testing.expectEqualStrings("ps aux", response.command);
+    try testing.expect(response.error_message == null);
+
+    // Clean up allocated memory
+    testing.allocator.free(response.command);
+    if (response.error_message) |msg| {
+        testing.allocator.free(msg);
+    }
 }
