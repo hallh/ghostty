@@ -758,6 +758,7 @@ fn updateShortcutsHint(self: *LLMAssistantDialog) void {
 const TerminalContext = struct {
     commands: std.ArrayList(CommandEntry),
     current_input: ?[]u8 = null,
+    current_input_full_line: ?[]u8 = null, // Full line with decorations and cursor marker
     allocator: std.mem.Allocator,
 
     const CommandEntry = struct {
@@ -773,6 +774,9 @@ const TerminalContext = struct {
         self.commands.deinit();
         if (self.current_input) |input| {
             self.allocator.free(input);
+        }
+        if (self.current_input_full_line) |full_line| {
+            self.allocator.free(full_line);
         }
     }
 };
@@ -1032,46 +1036,38 @@ fn extractCurrentInput(self: *LLMAssistantDialog, surface: *Surface, context: *T
         }
 
         context.current_input = try allocator.dupe(u8, input_with_cursor.items);
-    } else {
-        // Fallback: Use selectLine but try to clean up prompt decorations
-        if (screen.selectLine(.{
-            .pin = cursor_pin,
-            .whitespace = &.{ 0, ' ', '\t' }, // Trim whitespace characters
-            .semantic_prompt_boundary = true, // Use semantic boundaries to reduce noise
-        })) |line_selection| {
-            var line_text = surface.core_surface.dumpTextLocked(allocator, line_selection) catch |err| {
-                log.warn("Failed to extract current input line: {}", .{err});
-                return;
-            };
-            defer line_text.deinit(allocator);
+    }
 
-            const line_start_pin = line_selection.start();
-            const cursor_offset = calculateCursorOffsetInLine(line_start_pin, cursor_pin);
+    // Always capture the full line with decorations for LLM context
+    if (screen.selectLine(.{
+        .pin = cursor_pin,
+        .whitespace = null, // Don't trim anything - keep all decorations
+        .semantic_prompt_boundary = false, // Include prompt decorations
+    })) |full_line_selection| {
+        var full_line_text = surface.core_surface.dumpTextLocked(allocator, full_line_selection) catch |err| {
+            log.warn("Failed to extract full current line: {}", .{err});
+            return;
+        };
+        defer full_line_text.deinit(allocator);
 
-            // Try to clean up the text by removing common prompt patterns
-            const cleaned_text = line_text.plaintext();
-            const adjusted_cursor = if (cleaned_text.len < line_text.text.len)
-                @max(0, cursor_offset -| (line_text.text.len - cleaned_text.len))
-            else
-                cursor_offset;
+        const full_line_start_pin = full_line_selection.start();
+        const full_cursor_offset = calculateCursorOffsetInLine(full_line_start_pin, cursor_pin);
 
-            // Create input with cursor marker at the adjusted position
-            var input_with_cursor = std.ArrayList(u8).init(allocator);
-            defer input_with_cursor.deinit();
+        // Create full line with cursor marker
+        var full_line_with_cursor = std.ArrayList(u8).init(allocator);
+        defer full_line_with_cursor.deinit();
 
-            if (adjusted_cursor <= cleaned_text.len) {
-                try input_with_cursor.appendSlice(cleaned_text[0..adjusted_cursor]);
-                try input_with_cursor.appendSlice("!!CURSOR!!");
-                try input_with_cursor.appendSlice(cleaned_text[adjusted_cursor..]);
-            } else {
-                try input_with_cursor.appendSlice(cleaned_text);
-                try input_with_cursor.appendSlice("!!CURSOR!!");
-            }
-
-            context.current_input = try allocator.dupe(u8, input_with_cursor.items);
-
-            log.warn("[LLM_DEBUG] Used fallback line extraction with cleanup: '{s}' (cursor at {})", .{ context.current_input.?, adjusted_cursor });
+        const full_text = full_line_text.text;
+        if (full_cursor_offset <= full_text.len) {
+            try full_line_with_cursor.appendSlice(full_text[0..full_cursor_offset]);
+            try full_line_with_cursor.appendSlice("!!CURSOR!!");
+            try full_line_with_cursor.appendSlice(full_text[full_cursor_offset..]);
+        } else {
+            try full_line_with_cursor.appendSlice(full_text);
+            try full_line_with_cursor.appendSlice("!!CURSOR!!");
         }
+
+        context.current_input_full_line = try allocator.dupe(u8, full_line_with_cursor.items);
     }
 }
 
@@ -1210,46 +1206,37 @@ fn createEnhancedPrompt(self: *LLMAssistantDialog, user_prompt: []const u8, cont
     var prompt_builder = std.ArrayList(u8).init(self.arena.allocator());
     defer prompt_builder.deinit();
 
-    // Start with the user's prompt
-    try prompt_builder.appendSlice(user_prompt);
-
-    // Only add context if we have commands or current input
-    if (context.commands.items.len == 0 and context.current_input == null) {
-        return self.arena.allocator().dupe(u8, prompt_builder.items);
-    }
-
-    try prompt_builder.appendSlice("\n\n---\nAdditional context is provided below.\n\n");
+    // Use the new format requested by user
+    try prompt_builder.appendSlice("## The user is asking about how to perform certain steps or actions via their CLI.");
 
     // Add command history if available
     if (context.commands.items.len > 0) {
-        try prompt_builder.appendSlice("Last ");
-        try prompt_builder.writer().print("{} run command{s}:\n\n", .{ context.commands.items.len, if (context.commands.items.len == 1) @as([]const u8, "") else "s" });
+        try prompt_builder.appendSlice("  Their ");
+        const num_commands = @min(context.commands.items.len, 3); // Show up to 3 commands
+        try prompt_builder.writer().print("{} latest run command{s} {s} (from oldest to newest):\n\n", .{ num_commands, if (num_commands == 1) @as([]const u8, "") else "s", if (num_commands == 1) @as([]const u8, "is") else "are" });
 
-        for (context.commands.items, 0..) |entry, i| {
-            const command_num = context.commands.items.len - i;
-            try prompt_builder.writer().print("## {}\nCommand: `{s}`\n", .{ command_num, entry.command });
-
-            if (entry.output.len > 0) {
-                const trimmed = self.trimOutput(entry.output);
-                defer if (trimmed.ptr != entry.output.ptr) self.arena.allocator().free(trimmed);
-
-                try prompt_builder.appendSlice("Trimmed output:\n```\n");
-                try prompt_builder.appendSlice(trimmed);
-                try prompt_builder.appendSlice("\n```\n\n");
-            } else {
-                try prompt_builder.appendSlice("Trimmed output:\n```\n(no output)\n```\n\n");
-            }
+        // Show commands in reverse order (oldest to newest as requested)
+        var i = num_commands;
+        while (i > 0) {
+            i -= 1;
+            const entry = context.commands.items[context.commands.items.len - 1 - i];
+            try prompt_builder.writer().print("{}) {s}\n", .{ num_commands - i, entry.command });
         }
+    } else {
+        try prompt_builder.appendSlice("\n");
     }
 
-    // Add current terminal input if available
-    if (context.current_input) |current| {
-        try prompt_builder.appendSlice("The current state of the cli, the user's cursor placement is marked by `!!CURSOR!!` - this is not actually included in the user's terminal, but is for your information only.\n```\n");
-        try prompt_builder.appendSlice(current);
-        try prompt_builder.appendSlice("\n```\n");
+    // Add current terminal state if available
+    if (context.current_input_full_line) |full_line| {
+        try prompt_builder.appendSlice("\n## The current state of the active line is below. Ignore any decorations that may be present. When returning the suggested CLI command, return only the part of the command that is missing and assume that it will be inserted at the end of the current line:\n\n");
+        try prompt_builder.appendSlice(full_line);
+        try prompt_builder.appendSlice("\n");
     }
 
-    try prompt_builder.appendSlice("---\n");
+    // Add the user's request
+    try prompt_builder.appendSlice("\n## They wish to:\n\n");
+    try prompt_builder.appendSlice(user_prompt);
+    try prompt_builder.appendSlice("\n");
 
     return self.arena.allocator().dupe(u8, prompt_builder.items);
 }
