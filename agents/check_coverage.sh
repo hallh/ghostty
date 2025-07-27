@@ -69,6 +69,13 @@ if ! zig fmt --check . >/dev/null 2>&1; then
 fi
 echo "✅ Code formatting check passed."
 
+echo "Run build..."
+if ! zig build >/dev/null 2>&1; then
+    echo "❌ Build failed. Please run 'zig build' to fix build issues."
+    exit 1
+fi
+echo "✅ Build passed."
+
 if [ "$skip_tests" = false ]; then
     # Create temporary file to capture output
     test_output_file=$(mktemp)

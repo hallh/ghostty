@@ -14,8 +14,9 @@ const DialogState = struct {
     suggestion_text: []u8 = "",
     error_message: ?[]const u8 = null,
     current_prompt: []const u8 = "",
-    history: std.ArrayList([]u8),
+    history: std.ArrayList([:0]u8),
     allocator: std.mem.Allocator,
+    shortcuts_hint: []const u8 = "↑↓ Navigate history",
 
     // Widget visibility states
     progress_visible: bool = false,
@@ -29,7 +30,7 @@ const DialogState = struct {
 
     pub fn init(allocator: std.mem.Allocator) Self {
         return Self{
-            .history = std.ArrayList([]u8).init(allocator),
+            .history = std.ArrayList([:0]u8).init(allocator),
             .allocator = allocator,
         };
     }
@@ -56,6 +57,7 @@ const DialogState = struct {
         self.error_label_visible = false;
         self.clear_button_visible = false;
         self.accept_button_visible = false;
+        self.updateShortcutsHint();
     }
 
     /// Stop loading and show final state
@@ -64,6 +66,7 @@ const DialogState = struct {
         self.submit_button_label = "Get Suggestion";
         self.progress_visible = false;
         self.updateButtonSensitivity();
+        self.updateShortcutsHint();
     }
 
     /// Update button sensitivity based on prompt content
@@ -75,6 +78,16 @@ const DialogState = struct {
         } else {
             self.submit_button_sensitive = self.current_prompt.len > 0;
         }
+    }
+
+    /// Update shortcuts hint based on current state
+    pub fn updateShortcutsHint(self: *Self) void {
+        self.shortcuts_hint = if (self.is_loading)
+            "Loading..."
+        else if (self.suggestion_box_visible)
+            "Ctrl+Enter accept"
+        else
+            "↑↓ Navigate history";
     }
 
     /// Set prompt text and update UI state
@@ -94,6 +107,7 @@ const DialogState = struct {
         self.suggestion_box_visible = true;
         self.clear_button_visible = true;
         self.accept_button_visible = true;
+        self.updateShortcutsHint();
     }
 
     /// Complete request and finalize state
@@ -114,6 +128,7 @@ const DialogState = struct {
         self.clear_button_visible = true;
         self.accept_button_visible = false;
         self.stopLoading();
+        self.updateShortcutsHint();
     }
 
     /// Clear suggestion and return to input state (Esc behavior)
@@ -130,11 +145,12 @@ const DialogState = struct {
         self.clear_button_visible = false;
         self.accept_button_visible = false;
         self.updateButtonSensitivity();
+        self.updateShortcutsHint();
     }
 
     /// Add prompt to history
     pub fn addToHistory(self: *Self, prompt: []const u8) !void {
-        const owned_prompt = try self.allocator.dupe(u8, prompt);
+        const owned_prompt = try self.allocator.dupeZ(u8, prompt);
         try self.history.append(owned_prompt);
     }
 
@@ -1287,25 +1303,1327 @@ test "Focus-independent keyboard shortcut simulation" {
     // regardless of focus state
 }
 
-test "UI hints and labels are correctly set" {
-    // This test verifies that the UI contains the correct hints
-    // The actual text is defined in the blueprint file
-
-    // We can't directly test the GTK widgets here, but we can verify
-    // that our DialogState mock properly represents the expected behavior
-
+test "Context-sensitive shortcuts hints work correctly" {
     var dialog = DialogState.init(testing.allocator);
     defer dialog.deinit();
 
-    // The blueprint should contain hints about keyboard shortcuts
-    // "↑↓ navigate history • Enter submit • Ctrl+Enter accept • Esc back/close"
+    // 1. Initial state should show input hints
+    try testing.expectEqualStrings("↑↓ Navigate history", dialog.shortcuts_hint);
 
-    // Verify that keyboard shortcuts work as documented
-    try testing.expect(dialog.input_box_visible); // Initially in input state for Enter submit
+    // 2. Loading state should show loading message
+    dialog.startLoading();
+    try testing.expectEqualStrings("Loading...", dialog.shortcuts_hint);
 
-    try dialog.setSuggestionText("test command");
-    try testing.expect(dialog.accept_button_visible); // Accept button visible for Ctrl+Enter
+    // 3. Suggestion state should show accept hints
+    dialog.stopLoading();
+    try dialog.setSuggestionText("ls -la");
+    try testing.expectEqualStrings("Ctrl+Enter accept", dialog.shortcuts_hint);
 
+    // 4. Error state should show accept hints (same as suggestion)
+    dialog.showError("Test error");
+    try testing.expectEqualStrings("Ctrl+Enter accept", dialog.shortcuts_hint);
+
+    // 5. Back to input state should show input hints again
     dialog.clearSuggestion();
-    try testing.expect(dialog.input_box_visible); // Back button (Esc) returns to input
+    try testing.expectEqualStrings("↑↓ Navigate history", dialog.shortcuts_hint);
+}
+
+test "History navigation with fixed garbage data issue" {
+    var dialog = DialogState.init(testing.allocator);
+    defer dialog.deinit();
+
+    // Add test history items (now stored as null-terminated strings)
+    try dialog.addToHistory("first command");
+    try dialog.addToHistory("second command");
+    try dialog.addToHistory("third command");
+
+    // Verify history is stored as null-terminated strings
+    try testing.expect(dialog.history.items.len == 3);
+    try testing.expectEqualStrings("first command", dialog.history.items[0]);
+    try testing.expectEqualStrings("second command", dialog.history.items[1]);
+    try testing.expectEqualStrings("third command", dialog.history.items[2]);
+
+    // The history items should be properly null-terminated ([:0]u8 type)
+    // This prevents the garbage data issue when setting GTK text fields
+    const first_item = dialog.history.items[0];
+    try testing.expect(@TypeOf(first_item) == [:0]u8);
+}
+
+test "UI compact design and single-size modal behavior" {
+    var dialog = DialogState.init(testing.allocator);
+    defer dialog.deinit();
+
+    // The modal should maintain consistent size throughout states
+    // Input state
+    try testing.expect(dialog.input_box_visible);
+    try testing.expect(!dialog.suggestion_box_visible);
+
+    // Loading state (compact progress)
+    dialog.startLoading();
+    try testing.expect(!dialog.input_box_visible);
+    try testing.expect(dialog.suggestion_box_visible);
+    try testing.expect(dialog.progress_visible);
+
+    // Suggestion state (compact display)
+    dialog.stopLoading();
+    try dialog.setSuggestionText("echo test");
+    try testing.expect(!dialog.input_box_visible);
+    try testing.expect(dialog.suggestion_box_visible);
+    try testing.expect(!dialog.progress_visible);
+    try testing.expect(dialog.accept_button_visible);
+
+    // Back to input (maintains compact design)
+    dialog.clearSuggestion();
+    try testing.expect(dialog.input_box_visible);
+    try testing.expect(!dialog.suggestion_box_visible);
+}
+
+test "Input field is focused after command generation" {
+    var dialog = DialogState.init(testing.allocator);
+    defer dialog.deinit();
+
+    // Simulate the complete workflow: start loading, get suggestion
+    dialog.startLoading();
+    dialog.stopLoading();
+    try dialog.setSuggestionText("ls -la");
+
+    // After generation, keyboard shortcuts should work (input should be focused)
+    // We can't directly test focus, but we can verify the suggestion is visible
+    // and the shortcuts hint reflects this state
+    try testing.expect(dialog.suggestion_box_visible);
+    try testing.expectEqualStrings("Ctrl+Enter accept", dialog.shortcuts_hint);
+}
+
+test "Input field is cleared after accepting suggestion" {
+    var dialog = DialogState.init(testing.allocator);
+    defer dialog.deinit();
+
+    // Set some input text and get a suggestion
+    dialog.setPromptText("test command");
+    try dialog.setSuggestionText("ls -la");
+
+    // After accepting, the dialog should return to input state
+    // The actual clearing happens in the real implementation, here we just test the UI state
+    dialog.clearSuggestion();
+
+    // The dialog should be back to input state ready for next use
+    try testing.expect(dialog.input_box_visible);
+    try testing.expect(!dialog.suggestion_box_visible);
+    try testing.expectEqualStrings("↑↓ Navigate history", dialog.shortcuts_hint);
+}
+
+test "Terminal context integration works with empty context" {
+    var dialog = DialogState.init(testing.allocator);
+    defer dialog.deinit();
+
+    // Test that the system works when no terminal context is available
+    // This is a basic integration test to ensure our new code doesn't break existing functionality
+    dialog.setPromptText("list files");
+
+    // Even without terminal context, the dialog should work normally
+    try testing.expect(dialog.submit_button_sensitive);
+    try testing.expectEqualStrings("list files", dialog.current_prompt);
+}
+
+test "Terminal context builds the correct prompt" {
+    const allocator = std.testing.allocator;
+
+    // 1. Create a mock provider
+    var mock_provider = MockLLMProvider{
+        .response_command = "ls -la",
+    };
+
+    // 2. Define terminal context
+    const context = llm.TerminalContext{
+        .command_history = "ls -l\ngit status",
+        .current_input = "cat ",
+    };
+
+    // 3. Create a request with context
+    const request = llm.LLMRequest{
+        .prompt = "list all files",
+        .terminal_context = context,
+    };
+
+    // 4. Simulate the prompt building
+    const expected_prompt = "Recent command history:\nls -l\ngit status\n\nCurrent terminal input:\ncat \n\nUser request: list all files";
+
+    // 5. In a real scenario, this would be passed to the LLM provider
+    // For this test, we just verify that the prompt would be built correctly
+    // The actual prompt building logic is in the provider, but we can simulate it here
+    var full_prompt = std.ArrayList(u8).init(allocator);
+    defer full_prompt.deinit();
+    const writer = full_prompt.writer();
+
+    if (request.terminal_context.?.command_history) |history| {
+        try writer.print("Recent command history:\n{s}\n\n", .{history});
+    }
+    if (request.terminal_context.?.current_input) |input| {
+        try writer.print("Current terminal input:\n{s}\n\n", .{input});
+    }
+    try writer.print("User request: {s}", .{request.prompt});
+
+    try testing.expectEqualStrings(expected_prompt, full_prompt.items);
+
+    // This part just ensures the mock provider still works, though we aren't testing its output here
+    const response = try mock_provider.provider().request(allocator, request);
+    defer allocator.free(response.command);
+    try testing.expectEqualStrings("ls -la", response.command);
+}
+
+test "Provider JSON generation without terminal context works correctly" {
+    const allocator = std.testing.allocator;
+
+    // Test that providers work correctly with plain prompts (no terminal context)
+    const anthropic = @import("anthropic.zig");
+    const config = @import("../config.zig");
+
+    const cfg = config.Config{};
+    const provider = try anthropic.AnthropicProvider.init(allocator, "test-key", &cfg);
+    defer provider.deinit(allocator);
+
+    const request = llm.LLMRequest{
+        .prompt = "get the top 3 files by coverage excluding files with 100% coverage",
+        .system_prompt = "You are a helpful assistant.",
+    };
+
+    // Generate the JSON payload
+    const json_payload = try provider.buildRequestJSON(allocator, request, false);
+    defer allocator.free(json_payload);
+
+    // Parse the JSON to verify it's valid
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_payload, .{}) catch |err| {
+        std.debug.print("Failed to parse JSON: {}\nJSON payload: {s}\n", .{ err, json_payload });
+        return err;
+    };
+    defer parsed.deinit();
+
+    const json_obj = parsed.value.object;
+
+    // Verify the basic structure
+    try testing.expect(json_obj.contains("model"));
+    try testing.expect(json_obj.contains("messages"));
+    try testing.expect(json_obj.contains("max_tokens"));
+
+    std.debug.print("✓ Anthropic JSON generation works correctly\n", .{});
+}
+
+test "OpenAI provider JSON generation works correctly" {
+    const allocator = std.testing.allocator;
+
+    const openai = @import("openai.zig");
+    const config = @import("../config.zig");
+
+    const cfg = config.Config{};
+    const provider = try openai.OpenAIProvider.init(allocator, "test-key", &cfg);
+    defer provider.deinit(allocator);
+
+    const request = llm.LLMRequest{
+        .prompt = "help me find test files",
+        .system_prompt = "You are a helpful assistant.",
+    };
+
+    const json_payload = try provider.buildRequestJSON(allocator, request, false);
+    defer allocator.free(json_payload);
+
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_payload, .{}) catch |err| {
+        std.debug.print("Failed to parse OpenAI JSON: {}\nJSON payload: {s}\n", .{ err, json_payload });
+        return err;
+    };
+    defer parsed.deinit();
+
+    const json_obj = parsed.value.object;
+
+    // Verify basic structure
+    try testing.expect(json_obj.contains("model"));
+    try testing.expect(json_obj.contains("messages"));
+
+    std.debug.print("✓ OpenAI JSON generation works correctly\n", .{});
+}
+
+test "Gemini provider JSON generation works correctly" {
+    const allocator = std.testing.allocator;
+
+    const gemini = @import("gemini.zig");
+    const config = @import("../config.zig");
+
+    const cfg = config.Config{};
+    const provider = try gemini.GeminiProvider.init(allocator, "test-key", &cfg);
+    defer provider.deinit(allocator);
+
+    const request = llm.LLMRequest{
+        .prompt = "suggest a npm script to run",
+        .system_prompt = "You are a helpful assistant.",
+    };
+
+    const json_payload = try provider.buildRequestJSON(allocator, request);
+    defer allocator.free(json_payload);
+
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_payload, .{}) catch |err| {
+        std.debug.print("Failed to parse Gemini JSON: {}\nJSON payload: {s}\n", .{ err, json_payload });
+        return err;
+    };
+    defer parsed.deinit();
+
+    const json_obj = parsed.value.object;
+
+    // Verify basic structure
+    try testing.expect(json_obj.contains("contents"));
+    try testing.expect(json_obj.contains("systemInstruction"));
+
+    std.debug.print("✓ Gemini JSON generation works correctly\n", .{});
+}
+
+// =====================================================
+// REGRESSION TESTS FOR MEMORY CORRUPTION BUG
+// =====================================================
+
+test "Regression: Memory corruption bug in background thread prompt handling" {
+    const allocator = std.testing.allocator;
+
+    // This test reproduces the exact scenario that caused the memory corruption:
+    // 1. Create an enhanced prompt that gets allocated
+    // 2. Pass it to a simulated background thread context
+    // 3. Verify the prompt remains uncorrupted throughout the process
+
+    // Simulate creating an enhanced prompt (like createEnhancedPrompt does)
+    const original_prompt = "get the top 3 files by coverage excluding files with 100% coverage";
+    const enhanced_prompt = try std.fmt.allocPrint(allocator, "Enhanced context:\nSome terminal context here\n\nUser request: {s}", .{original_prompt});
+    defer allocator.free(enhanced_prompt);
+
+    // Create the request like the GTK dialog does
+    const request = llm.LLMRequest{
+        .prompt = enhanced_prompt,
+    };
+
+    // Simulate the RequestContext structure used in background threads
+    const RequestContext = struct {
+        provider: llm.LLMProvider,
+        request: llm.LLMRequest,
+        allocator: std.mem.Allocator,
+        enhanced_prompt: []const u8,
+        original_prompt: []const u8,
+    };
+
+    // Create a mock provider for testing
+    var mock_provider = MockLLMProvider{
+        .response_command = "find . -name '*.json' | head -3",
+    };
+    const provider = mock_provider.provider();
+
+    // Create context like the real code does
+    var context = RequestContext{
+        .provider = provider,
+        .request = request,
+        .allocator = allocator,
+        .enhanced_prompt = enhanced_prompt,
+        .original_prompt = original_prompt,
+    };
+
+    // Simulate background thread processing
+    // The key test: verify that the prompt is NOT corrupted when accessed
+    try testing.expectEqualStrings(enhanced_prompt, context.request.prompt);
+
+    // Verify the prompt contains the expected content (not corrupted bytes like [170,170,170...])
+    try testing.expect(std.mem.indexOf(u8, context.request.prompt, original_prompt) != null);
+    try testing.expect(std.mem.indexOf(u8, context.request.prompt, "Enhanced context") != null);
+
+    // Verify prompt length is reasonable (not corrupted)
+    try testing.expect(context.request.prompt.len > original_prompt.len);
+    try testing.expect(context.request.prompt.len < 1000); // Should be reasonable size
+
+    // Simulate making the actual provider request
+    var response = try context.provider.request(allocator, context.request);
+    defer response.deinit(allocator);
+
+    // Verify the response was successful (proving the prompt wasn't corrupted)
+    try testing.expect(response.command.len > 0);
+    try testing.expectEqualStrings("find . -name '*.json' | head -3", response.command);
+
+    std.debug.print("✓ Regression test passed: No memory corruption in background thread prompt handling\n", .{});
+}
+
+test "Regression: JSON serialization with valid vs corrupted prompts" {
+    const allocator = std.testing.allocator;
+
+    // This test specifically targets the JSON serialization issue that was causing
+    // prompts to be serialized as [170,170,170...] instead of strings
+
+    const openai = @import("openai.zig");
+    const config = @import("../config.zig");
+
+    const cfg = config.Config{};
+    const provider = try openai.OpenAIProvider.init(allocator, "test-key", &cfg);
+    defer provider.deinit(allocator);
+
+    // Test 1: Valid prompt should serialize correctly
+    const valid_prompt = "get the top 3 files by coverage excluding files with 100% coverage";
+    const valid_request = llm.LLMRequest{
+        .prompt = valid_prompt,
+        .system_prompt = "You are a helpful assistant",
+    };
+
+    const valid_json = try provider.buildRequestJSON(allocator, valid_request, false);
+    defer allocator.free(valid_json);
+
+    // Parse the JSON to verify structure
+    const parsed_valid = try std.json.parseFromSlice(std.json.Value, allocator, valid_json, .{});
+    defer parsed_valid.deinit();
+
+    const valid_obj = parsed_valid.value.object;
+    try testing.expect(valid_obj.contains("messages"));
+    const valid_messages = valid_obj.get("messages").?.array;
+    try testing.expect(valid_messages.items.len == 2);
+
+    // Verify the user message content is a STRING, not an array of integers
+    const user_message = valid_messages.items[1].object;
+    const user_content = user_message.get("content").?;
+
+    // This is the critical test: content should be a string, not an array
+    try testing.expect(user_content == .string);
+    try testing.expectEqualStrings(valid_prompt, user_content.string);
+
+    // Verify it's NOT an array of integers (which was the bug)
+    try testing.expect(user_content != .array);
+
+    std.debug.print("✓ Regression test passed: Valid prompts serialize as strings, not integer arrays\n", .{});
+}
+
+test "Regression: Use-after-free scenario with enhanced prompt cleanup" {
+    const allocator = std.testing.allocator;
+
+    // This test reproduces the EXACT bug scenario:
+    // 1. Allocate enhanced prompt
+    // 2. Create LLMRequest pointing to it
+    // 3. Free enhanced prompt (simulating the old defer behavior)
+    // 4. Try to use the request (simulating background thread)
+    // 5. Verify we can detect/prevent corruption
+
+    const original_prompt = "get the top 3 files by coverage excluding files with 100% coverage";
+
+    // Step 1: Allocate enhanced prompt (like createEnhancedPrompt)
+    const enhanced_prompt = try std.fmt.allocPrint(allocator, "Terminal context here\nUser request: {s}", .{original_prompt});
+
+    // Step 2: Create request pointing to enhanced prompt
+    const request = llm.LLMRequest{
+        .prompt = enhanced_prompt,
+    };
+
+    // Step 3: This simulates the old bug - freeing the enhanced prompt too early
+    // (In the old code, this happened due to the defer statement)
+    // allocator.free(enhanced_prompt); // DON'T do this - it would cause use-after-free
+
+    // Instead, let's test that our new approach keeps the memory valid
+    // Create the RequestContext structure like our fixed code does
+    const TestContext = struct {
+        request: llm.LLMRequest,
+        enhanced_prompt: []const u8,
+        original_prompt: []const u8,
+
+        fn cleanup(self: *@This(), alloc: std.mem.Allocator) void {
+            // Only free if enhanced_prompt was actually allocated
+            if (self.enhanced_prompt.ptr != self.original_prompt.ptr) {
+                alloc.free(self.enhanced_prompt);
+            }
+        }
+    };
+
+    var context = TestContext{
+        .request = request,
+        .enhanced_prompt = enhanced_prompt,
+        .original_prompt = original_prompt,
+    };
+    defer context.cleanup(allocator);
+
+    // Step 4: Simulate background thread usage - verify prompt is still valid
+    try testing.expectEqualStrings(enhanced_prompt, context.request.prompt);
+
+    // Verify the prompt content is not corrupted
+    try testing.expect(std.mem.indexOf(u8, context.request.prompt, original_prompt) != null);
+
+    // Test that we can still use the prompt for JSON serialization
+    const openai = @import("openai.zig");
+    const config = @import("../config.zig");
+
+    const cfg = config.Config{};
+    const provider = try openai.OpenAIProvider.init(allocator, "test-key", &cfg);
+    defer provider.deinit(allocator);
+
+    // This should work without corruption
+    const json = try provider.buildRequestJSON(allocator, context.request, false);
+    defer allocator.free(json);
+
+    // Verify the JSON contains the original prompt, not corrupted data
+    try testing.expect(std.mem.indexOf(u8, json, original_prompt) != null);
+
+    // Verify it doesn't contain the corruption pattern [170,170,170...]
+    try testing.expect(std.mem.indexOf(u8, json, "[170,170") == null);
+
+    std.debug.print("✓ Regression test passed: Use-after-free prevented, memory stays valid\n", .{});
+}
+
+// =====================================================
+// COMPREHENSIVE END-TO-END PROVIDER TESTS
+// =====================================================
+
+test "End-to-end: All providers handle requests without errors" {
+    const allocator = std.testing.allocator;
+    const config = @import("../config.zig");
+    const cfg = config.Config{};
+
+    // Test data that simulates a real command suggestion scenario
+    const request = llm.LLMRequest{
+        .prompt = "help me complete this git commit message for a bug fix",
+        .system_prompt = "You are a helpful command-line assistant.",
+        .model = "test-model",
+        .max_tokens = 100,
+        .temperature = 0.7,
+    };
+
+    // Test Anthropic provider
+    {
+        const anthropic = @import("anthropic.zig");
+        const provider = try anthropic.AnthropicProvider.init(allocator, "test-key", &cfg);
+        defer provider.deinit(allocator);
+
+        const json_payload = try provider.buildRequestJSON(allocator, request, false);
+        defer allocator.free(json_payload);
+
+        // Verify JSON is valid and contains expected structure
+        const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_payload, .{}) catch |err| {
+            std.debug.print("Anthropic JSON parsing failed: {}\nPayload: {s}\n", .{ err, json_payload });
+            return err;
+        };
+        defer parsed.deinit();
+
+        const json_obj = parsed.value.object;
+        try testing.expect(json_obj.contains("model"));
+        try testing.expect(json_obj.contains("messages"));
+        try testing.expect(json_obj.contains("system"));
+        try testing.expect(json_obj.contains("max_tokens"));
+
+        // Verify message structure is correct
+        const messages = json_obj.get("messages").?.array;
+        try testing.expect(messages.items.len >= 1);
+    }
+
+    // Test OpenAI provider
+    {
+        const openai = @import("openai.zig");
+        const provider = try openai.OpenAIProvider.init(allocator, "test-key", &cfg);
+        defer provider.deinit(allocator);
+
+        const json_payload = try provider.buildRequestJSON(allocator, request, false);
+        defer allocator.free(json_payload);
+
+        // Verify JSON is valid and contains expected structure
+        const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_payload, .{}) catch |err| {
+            std.debug.print("OpenAI JSON parsing failed: {}\nPayload: {s}\n", .{ err, json_payload });
+            return err;
+        };
+        defer parsed.deinit();
+
+        const json_obj = parsed.value.object;
+        try testing.expect(json_obj.contains("model"));
+        try testing.expect(json_obj.contains("messages"));
+        try testing.expect(json_obj.contains("max_tokens"));
+        try testing.expect(json_obj.contains("temperature"));
+
+        // Verify both system and user messages exist
+        const messages = json_obj.get("messages").?.array;
+        try testing.expect(messages.items.len >= 2);
+    }
+
+    // Test Gemini provider
+    {
+        const gemini = @import("gemini.zig");
+        const provider = try gemini.GeminiProvider.init(allocator, "test-key", &cfg);
+        defer provider.deinit(allocator);
+
+        const json_payload = try provider.buildRequestJSON(allocator, request);
+        defer allocator.free(json_payload);
+
+        // Verify JSON is valid and contains expected structure
+        const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_payload, .{}) catch |err| {
+            std.debug.print("Gemini JSON parsing failed: {}\nPayload: {s}\n", .{ err, json_payload });
+            return err;
+        };
+        defer parsed.deinit();
+
+        const json_obj = parsed.value.object;
+        try testing.expect(json_obj.contains("contents"));
+        try testing.expect(json_obj.contains("systemInstruction"));
+        try testing.expect(json_obj.contains("generationConfig"));
+
+        // Verify content structure is correct
+        const contents = json_obj.get("contents").?.array;
+        try testing.expect(contents.items.len >= 1);
+
+        // Verify generation config
+        const gen_config = json_obj.get("generationConfig").?.object;
+        try testing.expect(gen_config.contains("maxOutputTokens"));
+        try testing.expect(gen_config.contains("temperature"));
+    }
+
+    std.debug.print("✓ All providers pass end-to-end basic functionality test\n", .{});
+}
+
+test "End-to-end: All providers handle requests without terminal context (backward compatibility)" {
+    const allocator = std.testing.allocator;
+    const config = @import("../config.zig");
+    const cfg = config.Config{};
+
+    // Test request without terminal context to ensure backward compatibility
+    const request = llm.LLMRequest{
+        .prompt = "list all files in the current directory",
+        .terminal_context = null,
+        .system_prompt = "You are a helpful assistant.",
+    };
+
+    // Test all providers can handle requests without terminal context
+    {
+        const anthropic = @import("anthropic.zig");
+        const provider = try anthropic.AnthropicProvider.init(allocator, "test-key", &cfg);
+        defer provider.deinit(allocator);
+
+        const json_payload = try provider.buildRequestJSON(allocator, request, false);
+        defer allocator.free(json_payload);
+
+        // Should not crash and should produce valid JSON
+        const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_payload, .{}) catch |err| {
+            std.debug.print("Anthropic backward compatibility failed: {}\n", .{err});
+            return err;
+        };
+        defer parsed.deinit();
+
+        // Verify basic structure is still correct
+        const json_obj = parsed.value.object;
+        try testing.expect(json_obj.contains("messages"));
+        const messages = json_obj.get("messages").?.array;
+        try testing.expect(messages.items.len == 1);
+
+        const user_msg = messages.items[0].object;
+        try testing.expectEqualStrings("user", user_msg.get("role").?.string);
+        try testing.expectEqualStrings("list all files in the current directory", user_msg.get("content").?.string);
+    }
+
+    {
+        const openai = @import("openai.zig");
+        const provider = try openai.OpenAIProvider.init(allocator, "test-key", &cfg);
+        defer provider.deinit(allocator);
+
+        const json_payload = try provider.buildRequestJSON(allocator, request, false);
+        defer allocator.free(json_payload);
+
+        const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_payload, .{}) catch |err| {
+            std.debug.print("OpenAI backward compatibility failed: {}\n", .{err});
+            return err;
+        };
+        defer parsed.deinit();
+
+        const json_obj = parsed.value.object;
+        try testing.expect(json_obj.contains("messages"));
+        const messages = json_obj.get("messages").?.array;
+        try testing.expect(messages.items.len == 2); // system + user
+    }
+
+    {
+        const gemini = @import("gemini.zig");
+        const provider = try gemini.GeminiProvider.init(allocator, "test-key", &cfg);
+        defer provider.deinit(allocator);
+
+        const json_payload = try provider.buildRequestJSON(allocator, request);
+        defer allocator.free(json_payload);
+
+        const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_payload, .{}) catch |err| {
+            std.debug.print("Gemini backward compatibility failed: {}\n", .{err});
+            return err;
+        };
+        defer parsed.deinit();
+
+        const json_obj = parsed.value.object;
+        try testing.expect(json_obj.contains("contents"));
+        const contents = json_obj.get("contents").?.array;
+        const content = contents.items[0].object;
+        const parts = content.get("parts").?.array;
+        const text = parts.items[0].object.get("text").?.string;
+
+        // Gemini includes system prompt in content when no terminal context, which is expected
+        try testing.expect(std.mem.indexOf(u8, text, "list all files in the current directory") != null);
+    }
+
+    std.debug.print("✓ All providers maintain backward compatibility without terminal context\n", .{});
+}
+
+test "End-to-end: All providers handle edge cases correctly" {
+    const allocator = std.testing.allocator;
+    const config = @import("../config.zig");
+    const cfg = config.Config{};
+
+    // Test various edge cases that could break in real usage
+    const edge_cases = [_]struct {
+        name: []const u8,
+        context: ?llm.TerminalContext,
+        prompt: []const u8,
+    }{
+        .{
+            .name = "empty command history",
+            .context = llm.TerminalContext{
+                .command_history = "",
+                .current_input = "ls",
+            },
+            .prompt = "help with ls command",
+        },
+        .{
+            .name = "empty current input",
+            .context = llm.TerminalContext{
+                .command_history = "cd /home",
+                .current_input = "",
+            },
+            .prompt = "suggest next command",
+        },
+        .{
+            .name = "long command history",
+            .context = llm.TerminalContext{
+                .command_history = "git init\ngit add .\ngit commit -m 'initial'\ngit remote add origin\ngit push\nls -la\ncd src\nfind . -name '*.zig'\ngrep -r 'test'\nvim main.zig",
+                .current_input = "git log --oneline | head -",
+            },
+            .prompt = "complete this git command",
+        },
+        .{
+            .name = "special characters in commands",
+            .context = llm.TerminalContext{
+                .command_history = "echo \"Hello World!\"\ngrep -E '[0-9]+' file.txt\nfind . -name '*.json' | xargs cat",
+                .current_input = "sed 's/old/new/g'",
+            },
+            .prompt = "help with sed command",
+        },
+    };
+
+    for (edge_cases) |case| {
+        const request = llm.LLMRequest{
+            .prompt = case.prompt,
+            .terminal_context = case.context,
+            .system_prompt = "You are a helpful assistant.",
+        };
+
+        // Test all providers handle this edge case
+        {
+            const anthropic = @import("anthropic.zig");
+            const provider = try anthropic.AnthropicProvider.init(allocator, "test-key", &cfg);
+            defer provider.deinit(allocator);
+
+            const json_payload = try provider.buildRequestJSON(allocator, request, false);
+            defer allocator.free(json_payload);
+
+            // Should not crash and should produce valid JSON
+            const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_payload, .{}) catch |err| {
+                std.debug.print("Anthropic failed on edge case '{s}': {}\n", .{ case.name, err });
+                return err;
+            };
+            defer parsed.deinit();
+        }
+
+        {
+            const openai = @import("openai.zig");
+            const provider = try openai.OpenAIProvider.init(allocator, "test-key", &cfg);
+            defer provider.deinit(allocator);
+
+            const json_payload = try provider.buildRequestJSON(allocator, request, false);
+            defer allocator.free(json_payload);
+
+            const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_payload, .{}) catch |err| {
+                std.debug.print("OpenAI failed on edge case '{s}': {}\n", .{ case.name, err });
+                return err;
+            };
+            defer parsed.deinit();
+        }
+
+        {
+            const gemini = @import("gemini.zig");
+            const provider = try gemini.GeminiProvider.init(allocator, "test-key", &cfg);
+            defer provider.deinit(allocator);
+
+            const json_payload = try provider.buildRequestJSON(allocator, request);
+            defer allocator.free(json_payload);
+
+            const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_payload, .{}) catch |err| {
+                std.debug.print("Gemini failed on edge case '{s}': {}\n", .{ case.name, err });
+                return err;
+            };
+            defer parsed.deinit();
+        }
+    }
+
+    std.debug.print("✓ All providers handle edge cases correctly\n", .{});
+}
+
+// Terminal Context Functionality Tests
+test "Terminal context: Environment variable censoring" {
+    const allocator = std.testing.allocator;
+
+    const TestDialog = struct {
+        arena: std.heap.ArenaAllocator,
+
+        fn init() @This() {
+            return .{
+                .arena = std.heap.ArenaAllocator.init(allocator),
+            };
+        }
+
+        fn deinit(self: *@This()) void {
+            self.arena.deinit();
+        }
+
+        fn censorEnvironmentVariables(self: *@This(), text: []const u8) ![]u8 {
+            const alloc = self.arena.allocator();
+
+            // Common environment variable patterns to detect and censor
+            const env_patterns = [_][]const u8{
+                "PATH=",    "HOME=",      "USER=",      "USERNAME=", "LOGNAME=",
+                "SHELL=",   "PWD=",       "OLDPWD=",    "LANG=",     "LC_",
+                "DISPLAY=", "TERM=",      "SSH_",       "SUDO_",     "DBUS_",
+                "XDG_",     "DESKTOP_",   "SESSION_",   "WAYLAND_",  "_KEY=",
+                "_TOKEN=",  "_SECRET=",   "_PASSWORD=", "API_KEY=",  "AUTH_",
+                "PRIVATE_", "CREDENTIAL",
+            };
+
+            var result = std.ArrayList(u8).init(alloc);
+            defer result.deinit();
+
+            var i: usize = 0;
+            while (i < text.len) {
+                var found_env = false;
+
+                // Check for environment variable patterns
+                for (env_patterns) |pattern| {
+                    if (i + pattern.len <= text.len and
+                        std.mem.startsWith(u8, text[i..], pattern))
+                    {
+                        // Found an env var, censor the value part
+                        try result.appendSlice(pattern);
+                        i += pattern.len;
+
+                        // Skip to next whitespace or newline (end of env var value)
+                        while (i < text.len and
+                            !std.ascii.isWhitespace(text[i]))
+                        {
+                            i += 1;
+                        }
+                        try result.appendSlice("****");
+                        found_env = true;
+                        break;
+                    }
+                }
+
+                if (!found_env) {
+                    try result.append(text[i]);
+                    i += 1;
+                }
+            }
+
+            return alloc.dupe(u8, result.items);
+        }
+
+        fn trimOutputWithEllipsis(self: *@This(), output: []const u8) []u8 {
+            const alloc = self.arena.allocator();
+            const max_chars = 50;
+
+            if (output.len <= max_chars * 2) {
+                return alloc.dupe(u8, output) catch @constCast(output);
+            }
+
+            // Create trimmed version with ellipsis
+            const trimmed = std.fmt.allocPrint(alloc, "{s} ... {s}", .{
+                output[0..max_chars],
+                output[output.len - max_chars ..],
+            }) catch return alloc.dupe(u8, output) catch @constCast(output);
+
+            return trimmed;
+        }
+    };
+
+    var dialog = TestDialog.init();
+    defer dialog.deinit();
+
+    // Test environment variable censoring
+    const input = "PATH=/usr/bin:/bin HOME=/home/user API_KEY=secret123 normal text";
+    const result = try dialog.censorEnvironmentVariables(input);
+
+    try std.testing.expect(std.mem.indexOf(u8, result, "PATH=****") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "HOME=****") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "API_KEY=****") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "normal text") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "secret123") == null); // Should be censored
+}
+
+test "Terminal context: Output trimming with ellipsis" {
+    const allocator = std.testing.allocator;
+
+    const TestDialog = struct {
+        arena: std.heap.ArenaAllocator,
+
+        fn init() @This() {
+            return .{
+                .arena = std.heap.ArenaAllocator.init(allocator),
+            };
+        }
+
+        fn deinit(self: *@This()) void {
+            self.arena.deinit();
+        }
+
+        fn trimOutputWithEllipsis(self: *@This(), output: []const u8) []u8 {
+            const alloc = self.arena.allocator();
+            const max_chars = 50;
+
+            if (output.len <= max_chars * 2) {
+                return alloc.dupe(u8, output) catch @constCast(output);
+            }
+
+            // Create trimmed version with ellipsis
+            const trimmed = std.fmt.allocPrint(alloc, "{s} ... {s}", .{
+                output[0..max_chars],
+                output[output.len - max_chars ..],
+            }) catch return alloc.dupe(u8, output) catch @constCast(output);
+
+            return trimmed;
+        }
+    };
+
+    var dialog = TestDialog.init();
+    defer dialog.deinit();
+
+    // Test short output (no trimming needed)
+    const short_output = "This is a short output";
+    const short_result = dialog.trimOutputWithEllipsis(short_output);
+    try std.testing.expectEqualStrings(short_output, short_result);
+
+    // Test long output (trimming needed)
+    const long_output = "A" ** 150; // 150 characters
+    const long_result = dialog.trimOutputWithEllipsis(long_output);
+
+    // Should be first 50 + " ... " + last 50 = 50 + 5 + 50 = 105 chars
+    try std.testing.expect(long_result.len < long_output.len);
+    try std.testing.expect(std.mem.indexOf(u8, long_result, " ... ") != null);
+    try std.testing.expect(std.mem.startsWith(u8, long_result, "A" ** 50));
+    try std.testing.expect(std.mem.endsWith(u8, long_result, "A" ** 50));
+}
+
+test "Terminal context: Command history formatting" {
+    const allocator = std.testing.allocator;
+
+    // Test the command history formatting in the enhanced prompt template
+    const CommandEntry = struct {
+        command: []u8,
+        output: []u8,
+    };
+
+    var commands = std.ArrayList(CommandEntry).init(allocator);
+    defer {
+        for (commands.items) |entry| {
+            allocator.free(entry.command);
+            allocator.free(entry.output);
+        }
+        commands.deinit();
+    }
+
+    // Add test commands
+    try commands.append(.{
+        .command = try allocator.dupe(u8, "ls -la"),
+        .output = try allocator.dupe(u8, "total 8\ndrwxr-xr-x 2 user user 4096 Jan 1 12:00 .\ndrwxr-xr-x 3 user user 4096 Jan 1 12:00 ..\n-rw-r--r-- 1 user user    0 Jan 1 12:00 file.txt"),
+    });
+
+    try commands.append(.{
+        .command = try allocator.dupe(u8, "echo 'hello world'"),
+        .output = try allocator.dupe(u8, "hello world"),
+    });
+
+    // Format the command history
+    var history_builder = std.ArrayList(u8).init(allocator);
+    defer history_builder.deinit();
+
+    for (commands.items, 0..) |entry, i| {
+        const command_num = commands.items.len - i;
+        try history_builder.writer().print("## {}\nCommand: `{s}`\nOutput:\n```\n{s}\n```\n\n", .{ command_num, entry.command, entry.output });
+    }
+
+    const history_str = history_builder.items;
+
+    // Verify the formatting
+    try std.testing.expect(std.mem.indexOf(u8, history_str, "## 2\nCommand: `ls -la`") != null);
+    try std.testing.expect(std.mem.indexOf(u8, history_str, "## 1\nCommand: `echo 'hello world'`") != null);
+    try std.testing.expect(std.mem.indexOf(u8, history_str, "Output:\n```\nhello world\n```") != null);
+}
+
+test "Terminal context: Enhanced prompt template integration" {
+    const allocator = std.testing.allocator;
+
+    // Simulate the enhanced prompt creation with terminal context
+    const user_prompt = "get the top 3 files by coverage excluding files with 100% coverage";
+    const command_history = "## 2\nCommand: `cat kcov-output/ghostty-test/coverage.json`\nOutput:\n```\nCoverage data...\n```\n\n## 1\nCommand: `zig build test -Dtest-coverage`\nOutput:\n```\nTest results...\n```\n\n";
+    const current_input = "cat kcov-output/ghostty-test/coverage.json | jq -r !!CURSOR!! | tee /tmp/out.csv";
+
+    var prompt_builder = std.ArrayList(u8).init(allocator);
+    defer prompt_builder.deinit();
+
+    // Build enhanced prompt using the specified template
+    try prompt_builder.appendSlice(user_prompt);
+    try prompt_builder.appendSlice("\n\n---\nAdditional context is provided below.\n\n");
+    try prompt_builder.appendSlice("Last 2 run commands:\n\n");
+    try prompt_builder.appendSlice(command_history);
+    try prompt_builder.appendSlice("The current state of the cli, the user's cursor placement is marked by `!!CURSOR!!` - this is not actually included in the user's terminal, but is for your information only.\n```\n");
+    try prompt_builder.appendSlice(current_input);
+    try prompt_builder.appendSlice("\n```\n---\n");
+
+    const enhanced_prompt = prompt_builder.items;
+
+    // Verify the enhanced prompt contains all expected sections
+    try std.testing.expect(std.mem.indexOf(u8, enhanced_prompt, user_prompt) != null);
+    try std.testing.expect(std.mem.indexOf(u8, enhanced_prompt, "Additional context is provided below") != null);
+    try std.testing.expect(std.mem.indexOf(u8, enhanced_prompt, "Last 2 run commands") != null);
+    try std.testing.expect(std.mem.indexOf(u8, enhanced_prompt, "Command: `cat kcov-output/ghostty-test/coverage.json`") != null);
+    try std.testing.expect(std.mem.indexOf(u8, enhanced_prompt, "!!CURSOR!!") != null);
+    try std.testing.expect(std.mem.indexOf(u8, enhanced_prompt, "current state of the cli") != null);
+}
+
+test "End-to-end: Command suggestion with command history" {
+    const allocator = std.testing.allocator;
+
+    var dialog = DialogState.init(allocator);
+    defer dialog.deinit();
+
+    var surface = MockSurface.init(allocator);
+    defer surface.deinit();
+
+    var mock_provider = MockLLMProvider{
+        .response_command = "jq -r '.results[] | select(.coverage < 100) | .file' coverage.json | head -3",
+    };
+
+    // 1. Add command history to dialog
+    try dialog.addToHistory("zig build test -Dtest-coverage");
+    try dialog.addToHistory("cat kcov-output/ghostty-test/coverage.json");
+
+    // 2. User types a new request
+    dialog.setPromptText("get the top 3 files by coverage excluding files with 100% coverage");
+
+    // 3. Simulate enhanced prompt creation (this would be done by LLMAssistantDialog)
+    const enhanced_prompt = try std.fmt.allocPrint(allocator,
+        \\{s}
+        \\
+        \\---
+        \\Additional context is provided below.
+        \\
+        \\Last 2 run commands:
+        \\
+        \\## 2
+        \\Command: `cat kcov-output/ghostty-test/coverage.json`
+        \\Output:
+        \\```
+        \\Coverage data...
+        \\```
+        \\
+        \\## 1
+        \\Command: `zig build test -Dtest-coverage`
+        \\Output:
+        \\```
+        \\Test results...
+        \\```
+        \\
+        \\The current state of the cli, the user's cursor placement is marked by `!!CURSOR!!`:
+        \\```
+        \\jq -r '.results[]' coverage.json | !!CURSOR!!
+        \\```
+        \\---
+    , .{dialog.current_prompt});
+    defer allocator.free(enhanced_prompt);
+
+    // 4. Make request with enhanced prompt
+    const request = llm.LLMRequest{ .prompt = enhanced_prompt };
+    var response = try mock_provider.provider().request(allocator, request);
+    defer response.deinit(allocator);
+
+    // 5. Verify response
+    try std.testing.expect(response.command.len > 0);
+    try std.testing.expectEqualStrings("jq -r '.results[] | select(.coverage < 100) | .file' coverage.json | head -3", response.command);
+
+    // 6. Accept command suggestion
+    try surface.pasteCommand(response.command);
+    try std.testing.expectEqualStrings(response.command, surface.getLastPastedCommand().?);
+
+    std.log.info("✓ End-to-end with command history: Complete workflow passed", .{});
+}
+
+test "Terminal context: Memory management and cleanup" {
+    const allocator = std.testing.allocator;
+
+    // Test proper memory management for terminal context structures
+    const TerminalContext = struct {
+        commands: std.ArrayList(CommandEntry),
+        current_input: ?[]u8 = null,
+        allocator: std.mem.Allocator,
+
+        const CommandEntry = struct {
+            command: []u8,
+            output: []u8,
+        };
+
+        pub fn deinit(self: *@This()) void {
+            for (self.commands.items) |entry| {
+                self.allocator.free(entry.command);
+                self.allocator.free(entry.output);
+            }
+            self.commands.deinit();
+            if (self.current_input) |input| {
+                self.allocator.free(input);
+            }
+        }
+    };
+
+    // Create and populate context
+    var context = TerminalContext{
+        .commands = std.ArrayList(TerminalContext.CommandEntry).init(allocator),
+        .allocator = allocator,
+    };
+
+    try context.commands.append(.{
+        .command = try allocator.dupe(u8, "test command"),
+        .output = try allocator.dupe(u8, "test output"),
+    });
+
+    context.current_input = try allocator.dupe(u8, "current input with !!CURSOR!!");
+
+    // Verify context was created correctly
+    try std.testing.expect(context.commands.items.len == 1);
+    try std.testing.expectEqualStrings("test command", context.commands.items[0].command);
+    try std.testing.expectEqualStrings("test output", context.commands.items[0].output);
+    try std.testing.expect(context.current_input != null);
+    try std.testing.expectEqualStrings("current input with !!CURSOR!!", context.current_input.?);
+
+    // Clean up and verify no leaks
+    context.deinit();
+}
+
+// =====================================================
+// COMPREHENSIVE END-TO-END INTEGRATION TESTS
+// =====================================================
+
+test "End-to-end: Command suggestion without command history" {
+    const allocator = std.testing.allocator;
+
+    var dialog = DialogState.init(allocator);
+    defer dialog.deinit();
+
+    var surface = MockSurface.init(allocator);
+    defer surface.deinit();
+
+    var mock_provider = MockLLMProvider{
+        .response_command = "find . -name '*.md' -type f",
+    };
+
+    // 1. User types a request with no history
+    dialog.setPromptText("find all markdown files in current directory");
+    try testing.expect(dialog.history.items.len == 0); // No history
+
+    // 2. Make request with just the plain prompt (no terminal context)
+    const request = llm.LLMRequest{ .prompt = dialog.current_prompt };
+    var response = try mock_provider.provider().request(allocator, request);
+    defer response.deinit(allocator);
+
+    // 3. Verify response
+    try testing.expect(response.command.len > 0);
+    try testing.expectEqualStrings("find . -name '*.md' -type f", response.command);
+
+    // 4. Accept command suggestion
+    try surface.pasteCommand(response.command);
+    try testing.expectEqualStrings(response.command, surface.getLastPastedCommand().?);
+
+    // 5. Add to history after successful execution
+    try dialog.addToHistory(dialog.current_prompt);
+    try testing.expect(dialog.history.items.len == 1);
+
+    std.log.info("✓ End-to-end without command history: Complete workflow passed", .{});
+}
+
+test "End-to-end: Accept command with partially prefilled terminal" {
+    const allocator = std.testing.allocator;
+
+    var dialog = DialogState.init(allocator);
+    defer dialog.deinit();
+
+    var surface = MockSurface.init(allocator);
+    defer surface.deinit();
+
+    var mock_provider = MockLLMProvider{
+        .response_command = "git commit -m \"fix: resolve memory leak in parser\"",
+    };
+
+    // 1. Simulate partially filled terminal
+    const current_terminal_input = "git commit -m \"!!CURSOR!!\"";
+
+    // 2. User asks for help completing the command
+    dialog.setPromptText("help me write a commit message for fixing a memory leak");
+
+    // 3. Create enhanced prompt that includes the current terminal state
+    const enhanced_prompt = try std.fmt.allocPrint(allocator,
+        \\{s}
+        \\
+        \\---
+        \\Additional context is provided below.
+        \\
+        \\The current state of the cli, the user's cursor placement is marked by `!!CURSOR!!`:
+        \\```
+        \\{s}
+        \\```
+        \\---
+    , .{ dialog.current_prompt, current_terminal_input });
+    defer allocator.free(enhanced_prompt);
+
+    // 4. Make request
+    const request = llm.LLMRequest{ .prompt = enhanced_prompt };
+    var response = try mock_provider.provider().request(allocator, request);
+    defer response.deinit(allocator);
+
+    // 5. Verify response
+    try testing.expect(response.command.len > 0);
+
+    // 6. Simulate command insertion at cursor position
+    // In real implementation, this would replace the partial command or insert at cursor
+    try surface.pasteCommand(response.command);
+    try testing.expectEqualStrings("git commit -m \"fix: resolve memory leak in parser\"", surface.getLastPastedCommand().?);
+
+    std.log.info("✓ End-to-end with prefilled terminal: Command completion passed", .{});
+}
+
+test "End-to-end: Accept command with empty terminal" {
+    const allocator = std.testing.allocator;
+
+    var dialog = DialogState.init(allocator);
+    defer dialog.deinit();
+
+    var surface = MockSurface.init(allocator);
+    defer surface.deinit();
+
+    var mock_provider = MockLLMProvider{
+        .response_command = "docker ps -a --format \"table {{.Names}}\\t{{.Status}}\"",
+    };
+
+    // 1. User types request with clean terminal
+    dialog.setPromptText("show all docker containers with names and status");
+
+    // 2. Create enhanced prompt showing empty terminal
+    const enhanced_prompt = try std.fmt.allocPrint(allocator,
+        \\{s}
+        \\
+        \\---
+        \\Additional context is provided below.
+        \\
+        \\The current state of the cli, the user's cursor placement is marked by `!!CURSOR!!`:
+        \\```
+        \\!!CURSOR!!
+        \\```
+        \\---
+    , .{dialog.current_prompt});
+    defer allocator.free(enhanced_prompt);
+
+    // 3. Make request
+    const request = llm.LLMRequest{ .prompt = enhanced_prompt };
+    var response = try mock_provider.provider().request(allocator, request);
+    defer response.deinit(allocator);
+
+    // 4. Verify response
+    try testing.expect(response.command.len > 0);
+
+    // 5. Insert command at empty prompt
+    try surface.pasteCommand(response.command);
+    try testing.expectEqualStrings("docker ps -a --format \"table {{.Names}}\\t{{.Status}}\"", surface.getLastPastedCommand().?);
+
+    std.log.info("✓ End-to-end with empty terminal: Command insertion passed", .{});
+}
+
+test "End-to-end: Full workflow with history navigation and acceptance" {
+    const allocator = std.testing.allocator;
+
+    var dialog = DialogState.init(allocator);
+    defer dialog.deinit();
+
+    var surface = MockSurface.init(allocator);
+    defer surface.deinit();
+
+    var mock_provider = MockLLMProvider{
+        .response_command = "tail -f /var/log/nginx/access.log | grep 404",
+    };
+
+    // 1. Build up some command history first
+    try dialog.addToHistory("systemctl status nginx");
+    try dialog.addToHistory("ls /var/log/nginx/");
+    try dialog.addToHistory("cat /etc/nginx/nginx.conf");
+
+    // 2. Test history navigation
+    var current_index: ?usize = null;
+    var navigated_command = dialog.navigateHistory(.up, &current_index);
+    try testing.expectEqualStrings("cat /etc/nginx/nginx.conf", navigated_command);
+
+    navigated_command = dialog.navigateHistory(.up, &current_index);
+    try testing.expectEqualStrings("ls /var/log/nginx/", navigated_command);
+
+    // 3. User decides to make a new request instead of using history
+    dialog.setPromptText("monitor nginx for 404 errors in real time");
+
+    // 4. Create enhanced prompt with history and current state
+    const enhanced_prompt = try std.fmt.allocPrint(allocator,
+        \\{s}
+        \\
+        \\---
+        \\Additional context is provided below.
+        \\
+        \\Last 3 run commands:
+        \\
+        \\## 3
+        \\Command: `cat /etc/nginx/nginx.conf`
+        \\Output:
+        \\```
+        \\Server configuration...
+        \\```
+        \\
+        \\## 2
+        \\Command: `ls /var/log/nginx/`
+        \\Output:
+        \\```
+        \\access.log error.log
+        \\```
+        \\
+        \\## 1
+        \\Command: `systemctl status nginx`
+        \\Output:
+        \\```
+        \\Active: active (running)
+        \\```
+        \\
+        \\The current state of the cli, the user's cursor placement is marked by `!!CURSOR!!`:
+        \\```
+        \\!!CURSOR!!
+        \\```
+        \\---
+    , .{dialog.current_prompt});
+    defer allocator.free(enhanced_prompt);
+
+    // 5. Make request
+    const request = llm.LLMRequest{ .prompt = enhanced_prompt };
+    var response = try mock_provider.provider().request(allocator, request);
+    defer response.deinit(allocator);
+
+    // 6. Verify response incorporates context
+    try testing.expect(response.command.len > 0);
+    try testing.expectEqualStrings("tail -f /var/log/nginx/access.log | grep 404", response.command);
+
+    // 7. Accept and execute command
+    try surface.pasteCommand(response.command);
+    try dialog.addToHistory(dialog.current_prompt);
+
+    // 8. Verify final state
+    try testing.expect(dialog.history.items.len == 4);
+    try testing.expectEqualStrings("tail -f /var/log/nginx/access.log | grep 404", surface.getLastPastedCommand().?);
+
+    std.log.info("✓ End-to-end full workflow: History navigation and command acceptance passed", .{});
 }

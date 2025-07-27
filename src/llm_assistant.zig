@@ -12,111 +12,83 @@ const gemini = @import("llm_assistant/gemini.zig");
 
 /// Errors that can occur during LLM operations
 pub const LLMError = error{
-    /// Configuration is missing or invalid
-    InvalidConfiguration,
-    /// Network request failed
-    NetworkError,
-    /// API returned an error response
     APIError,
-    /// JSON parsing failed
-    JSONParseError,
-    /// Unsupported provider
-    UnsupportedProvider,
-    /// Authentication failed
     AuthenticationError,
-    /// Rate limit exceeded
-    RateLimitExceeded,
-    /// Request timeout
-    Timeout,
-    /// Invalid request payload
-    InvalidRequest,
-    /// Out of memory
+    InvalidConfiguration,
+    JSONParseError,
+    NetworkError,
     OutOfMemory,
-} || std.http.Client.RequestError || std.json.ParseError(std.json.Scanner);
+    RateLimitExceeded,
+    UnsupportedProvider,
+};
 
-/// Streaming response callback function
+/// Callback for streaming responses
 pub const StreamCallback = *const fn (chunk: []const u8, user_data: ?*anyopaque) void;
 
-/// LLM Response data
-pub const LLMResponse = struct {
-    /// The suggested command text
-    command: []const u8,
-    /// Whether this is the final response (for streaming)
-    is_final: bool = true,
-    /// Error message if the request failed
-    error_message: ?[]const u8 = null,
-
-    /// Free resources allocated for this response
-    pub fn deinit(self: *LLMResponse, allocator: std.mem.Allocator) void {
-        if (self.command.len > 0) allocator.free(self.command);
-        if (self.error_message) |err| allocator.free(err);
-    }
-};
-
-/// LLM Request parameters
-pub const LLMRequest = struct {
-    /// The user's natural language prompt
-    prompt: []const u8,
-    /// Provider-specific model to use
-    model: ?[]const u8 = null,
-    /// Temperature for response generation (0.0 to 1.0)
-    temperature: ?f32 = null,
-    /// Maximum tokens to generate
-    max_tokens: ?u32 = null,
-    /// System prompt override
-    system_prompt: ?[]const u8 = null,
-};
-
-/// Provider interface for different LLM APIs
+/// Base interface for all LLM providers
 pub const LLMProvider = struct {
-    const Self = @This();
-
-    /// Provider implementation function pointers
-    pub const Vtable = struct {
-        request: *const fn (
-            self: *anyopaque,
-            allocator: std.mem.Allocator,
-            request: LLMRequest,
-        ) LLMError!LLMResponse,
-
-        requestStream: *const fn (
-            self: *anyopaque,
-            allocator: std.mem.Allocator,
-            request: LLMRequest,
-            callback: StreamCallback,
-            user_data: ?*anyopaque,
-        ) LLMError!void,
-
-        deinit: *const fn (self: *anyopaque, allocator: std.mem.Allocator) void,
-    };
-
     ptr: *anyopaque,
     vtable: *const Vtable,
 
-    /// Make a blocking request to the LLM
-    pub fn request(
-        self: Self,
-        allocator: std.mem.Allocator,
-        req: LLMRequest,
-    ) LLMError!LLMResponse {
+    pub const Vtable = struct {
+        request: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, req: LLMRequest) LLMError!LLMResponse,
+        requestStream: *const fn (
+            ptr: *anyopaque,
+            allocator: std.mem.Allocator,
+            req: LLMRequest,
+            callback: StreamCallback,
+            user_data: ?*anyopaque,
+        ) LLMError!void,
+        deinit: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator) void,
+    };
+
+    pub fn deinit(self: LLMProvider, allocator: std.mem.Allocator) void {
+        self.vtable.deinit(self.ptr, allocator);
+    }
+
+    pub fn request(self: LLMProvider, allocator: std.mem.Allocator, req: LLMRequest) !LLMResponse {
         return self.vtable.request(self.ptr, allocator, req);
     }
 
-    /// Make a streaming request to the LLM
     pub fn requestStream(
-        self: Self,
+        self: LLMProvider,
         allocator: std.mem.Allocator,
         req: LLMRequest,
         callback: StreamCallback,
         user_data: ?*anyopaque,
-    ) LLMError!void {
+    ) !void {
         return self.vtable.requestStream(self.ptr, allocator, req, callback, user_data);
     }
+};
 
-    /// Clean up resources
-    pub fn deinit(self: Self, allocator: std.mem.Allocator) void {
-        self.vtable.deinit(self.ptr, allocator);
+/// Request structure for making LLM requests
+pub const LLMRequest = struct {
+    prompt: []const u8,
+    model: ?[]const u8 = null,
+    temperature: ?f32 = null,
+    max_tokens: ?u32 = null,
+    system_prompt: ?[]const u8 = null,
+    terminal_context: ?TerminalContext = null,
+};
+
+/// Response structure for LLM responses
+pub const LLMResponse = struct {
+    command: []const u8,
+    error_message: ?[]const u8 = null,
+    is_final: bool = false,
+
+    pub fn deinit(self: *LLMResponse, allocator: std.mem.Allocator) void {
+        allocator.free(self.command);
+        if (self.error_message) |msg| {
+            allocator.free(msg);
+        }
     }
+};
+
+/// Terminal context for richer prompts
+pub const TerminalContext = struct {
+    command_history: ?[]const u8 = null,
+    current_input: ?[]const u8 = null,
 };
 
 /// HTTP client wrapper for LLM API calls
@@ -147,7 +119,7 @@ pub const HTTPClient = struct {
         json_payload: []const u8,
         response_buffer: *std.ArrayList(u8),
     ) LLMError!std.http.Status {
-        const uri = std.Uri.parse(url) catch return LLMError.InvalidRequest;
+        const uri = std.Uri.parse(url) catch return LLMError.InvalidConfiguration;
 
         var header_buffer: [16 * 1024]u8 = undefined;
         const result = self.client.fetch(.{
@@ -186,7 +158,7 @@ pub const HTTPClient = struct {
         callback: StreamCallback,
         user_data: ?*anyopaque,
     ) LLMError!void {
-        const uri = std.Uri.parse(url) catch return LLMError.InvalidRequest;
+        const uri = std.Uri.parse(url) catch return LLMError.InvalidConfiguration;
 
         var server_header_buffer: [16 * 1024]u8 = undefined;
         var req = self.client.open(.POST, uri, .{

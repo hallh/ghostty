@@ -2,8 +2,8 @@ using Gtk 4.0;
 using Adw 1;
 
 Adw.Dialog llm-assistant-dialog {
-  content-width: 500;
-  content-height: 300;
+  content-width: 480;
+  content-height: 240;
 
   Adw.ToolbarView {
     top-bar-style: flat;
@@ -87,8 +87,8 @@ Adw.Dialog llm-assistant-dialog {
         }
 
         ScrolledWindow {
-          min-content-height: 120;
-          max-content-height: 200;
+          min-content-height: 80;
+          max-content-height: 120;
 
           TextView suggestion-text {
             editable: false;
@@ -156,8 +156,8 @@ Adw.Dialog llm-assistant-dialog {
       }
 
       // Keyboard shortcuts hints
-      Label {
-        label: _("↑↓ navigate history • Enter submit • Ctrl+Enter accept • Esc back/close");
+      Label shortcuts-hint {
+        label: _("↑↓ Navigate history");
         halign: start;
 
         styles [

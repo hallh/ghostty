@@ -150,32 +150,36 @@ pub const OpenAIProvider = struct {
     ) llm.LLMError!llm.LLMResponse {
         const self: *OpenAIProvider = @ptrCast(@alignCast(ptr));
 
-        // Build request JSON
+        std.log.info("[OPENAI_DEBUG] Starting request with prompt length: {}", .{req.prompt.len});
+        std.log.info("[OPENAI_DEBUG] Request has terminal_context: {}", .{req.terminal_context != null});
+
         const request_json = try self.buildRequestJSON(allocator, req, false);
         defer allocator.free(request_json);
 
-        // Prepare headers
-        var auth_header_buf: [512]u8 = undefined;
-        const auth_value = std.fmt.bufPrint(auth_header_buf[0..], "Bearer {s}", .{self.api_key}) catch |err| switch (err) {
-            error.NoSpaceLeft => return llm.LLMError.InvalidConfiguration, // API key too long
-        };
+        std.log.info("[OPENAI_DEBUG] Generated JSON length: {}", .{request_json.len});
+        std.log.info("[OPENAI_DEBUG] JSON preview: {s}", .{request_json});
 
         const headers = [_]std.http.Header{
-            .{ .name = "authorization", .value = auth_value },
+            .{ .name = "Authorization", .value = try std.fmt.allocPrint(allocator, "Bearer {s}", .{self.api_key}) },
         };
+        defer allocator.free(headers[0].value);
 
-        // Make HTTP request
         var response_buffer = std.ArrayList(u8).init(allocator);
         defer response_buffer.deinit();
 
         const url = API_BASE_URL ++ "/chat/completions";
+
+        std.log.info("[OPENAI_DEBUG] Making HTTP request to: {s}", .{url});
+
         const status = try self.http_client.postJSON(url, &headers, request_json, &response_buffer);
 
-        // Parse response
+        std.log.info("[OPENAI_DEBUG] HTTP response status: {}", .{status});
+        std.log.info("[OPENAI_DEBUG] Response length: {}", .{response_buffer.items.len});
+
         return self.parseResponse(allocator, response_buffer.items, status);
     }
 
-    /// Make a streaming request (now just calls regular request)
+    /// Make a streaming request (now just returns error)
     fn requestStream(
         _: *anyopaque,
         _: std.mem.Allocator,
@@ -184,31 +188,103 @@ pub const OpenAIProvider = struct {
         _: ?*anyopaque,
     ) llm.LLMError!void {
         // For simplicity, streaming now just returns an error
-        // The UI should use the blocking request method instead
         return llm.LLMError.UnsupportedProvider;
     }
 
     /// Build JSON request payload
-    fn buildRequestJSON(
+    pub fn buildRequestJSON(
         self: *Self,
         allocator: std.mem.Allocator,
         req: llm.LLMRequest,
         stream: bool,
     ) llm.LLMError![]u8 {
+        std.log.info("[OPENAI_DEBUG] buildRequestJSON called", .{});
+        std.log.info("[OPENAI_DEBUG] Input request has terminal_context: {}", .{req.terminal_context != null});
+
+        // Always use the prompt directly - it may already be enhanced with terminal context
+        std.log.info("[OPENAI_DEBUG] Using prompt as-is (may contain enhanced context)", .{});
+
+        std.log.info("[OPENAI_DEBUG] System prompt: '{s}'", .{req.system_prompt orelse self.system_prompt});
+        std.log.info("[OPENAI_DEBUG] User prompt: '{s}'", .{req.prompt});
+        std.log.info("[OPENAI_DEBUG] User prompt length: {}", .{req.prompt.len});
+        std.log.info("[OPENAI_DEBUG] User prompt type: {}", .{@TypeOf(req.prompt)});
+
         const messages = [_]OpenAIRequest.Message{
             .{ .role = "system", .content = req.system_prompt orelse self.system_prompt },
             .{ .role = "user", .content = req.prompt },
         };
 
+        std.log.info("[OPENAI_DEBUG] Messages array created, user message content: '{s}'", .{messages[1].content});
+        std.log.info("[OPENAI_DEBUG] Messages array created, user message content type: {}", .{@TypeOf(messages[1].content)});
+
         const api_request = OpenAIRequest{
             .model = req.model orelse self.model,
-            .messages = &messages,
             .max_tokens = req.max_tokens orelse self.max_tokens,
             .temperature = req.temperature orelse self.temperature,
+            .messages = &messages,
             .stream = stream,
         };
 
-        return std.json.stringifyAlloc(allocator, api_request, .{}) catch return llm.LLMError.JSONParseError;
+        std.log.info("[OPENAI_DEBUG] About to stringify JSON for standard request", .{});
+        std.log.info("[OPENAI_DEBUG] API request model: '{s}'", .{api_request.model});
+        std.log.info("[OPENAI_DEBUG] API request messages length: {}", .{api_request.messages.len});
+        std.log.info("[OPENAI_DEBUG] API request first message role: '{s}'", .{api_request.messages[0].role});
+        std.log.info("[OPENAI_DEBUG] API request first message content: '{s}'", .{api_request.messages[0].content});
+        std.log.info("[OPENAI_DEBUG] API request second message role: '{s}'", .{api_request.messages[1].role});
+        std.log.info("[OPENAI_DEBUG] API request second message content: '{s}'", .{api_request.messages[1].content});
+
+        const json_result = std.json.stringifyAlloc(allocator, api_request, .{}) catch |err| {
+            std.log.err("[OPENAI_DEBUG] JSON stringification failed: {}", .{err});
+            return err;
+        };
+
+        std.log.info("[OPENAI_DEBUG] Standard JSON stringification successful, length: {}", .{json_result.len});
+        return json_result;
+    }
+
+    /// Build JSON request payload with terminal context
+    fn buildPromptWithContext(
+        self: *Self,
+        allocator: std.mem.Allocator,
+        req: llm.LLMRequest,
+        context: llm.TerminalContext,
+        stream: bool,
+    ) llm.LLMError![]u8 {
+        std.log.info("[OPENAI_DEBUG] buildPromptWithContext called", .{});
+        std.log.info("[OPENAI_DEBUG] Terminal context - command_history: '{any}'", .{context.command_history});
+        std.log.info("[OPENAI_DEBUG] Terminal context - current_input: '{any}'", .{context.current_input});
+
+        // Build enhanced prompt with context
+        const enhanced_prompt = std.fmt.allocPrint(allocator, "Recent command history:\n{s}\n\nCurrent terminal input:\n{s}\n\nUser request: {s}", .{ context.command_history orelse "", context.current_input orelse "", req.prompt }) catch {
+            std.log.err("[OPENAI_DEBUG] Failed to build enhanced prompt", .{});
+            return llm.LLMError.OutOfMemory;
+        };
+        defer allocator.free(enhanced_prompt);
+
+        std.log.info("[OPENAI_DEBUG] Built enhanced prompt, length: {}", .{enhanced_prompt.len});
+        std.log.info("[OPENAI_DEBUG] Enhanced prompt preview: {s}", .{enhanced_prompt[0..@min(200, enhanced_prompt.len)]});
+
+        const messages = [_]OpenAIRequest.Message{
+            .{ .role = "system", .content = req.system_prompt orelse self.system_prompt },
+            .{ .role = "user", .content = enhanced_prompt },
+        };
+
+        const api_request = OpenAIRequest{
+            .model = req.model orelse self.model,
+            .max_tokens = req.max_tokens orelse self.max_tokens,
+            .temperature = req.temperature orelse self.temperature,
+            .messages = &messages,
+            .stream = stream,
+        };
+
+        std.log.info("[OPENAI_DEBUG] About to stringify JSON for context request", .{});
+        const json_result = std.json.stringifyAlloc(allocator, api_request, .{}) catch |err| {
+            std.log.err("[OPENAI_DEBUG] Context JSON stringification failed: {}", .{err});
+            return err;
+        };
+
+        std.log.info("[OPENAI_DEBUG] Context JSON stringification successful, length: {}", .{json_result.len});
+        return json_result;
     }
 
     /// Parse API response into LLMResponse

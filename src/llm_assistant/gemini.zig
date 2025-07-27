@@ -180,24 +180,32 @@ pub const GeminiProvider = struct {
     ) llm.LLMError!llm.LLMResponse {
         const self: *GeminiProvider = @ptrCast(@alignCast(ptr));
 
-        // Build request JSON
+        std.log.info("[GEMINI_DEBUG] Starting request with prompt length: {}", .{req.prompt.len});
+        std.log.info("[GEMINI_DEBUG] Request has terminal_context: {}", .{req.terminal_context != null});
+
         const request_json = try self.buildRequestJSON(allocator, req);
         defer allocator.free(request_json);
 
-        // Build URL with API key
-        var url_buffer: [512]u8 = undefined;
-        const url = std.fmt.bufPrint(url_buffer[0..], "{s}/models/{s}:generateContent?key={s}", .{ API_BASE_URL, self.model, self.api_key }) catch |err| switch (err) {
-            error.NoSpaceLeft => return llm.LLMError.InvalidConfiguration, // URL too long
-        };
+        std.log.info("[GEMINI_DEBUG] Generated JSON length: {}", .{request_json.len});
+        std.log.info("[GEMINI_DEBUG] JSON preview: {s}", .{request_json[0..@min(500, request_json.len)]});
 
-        // Make HTTP request
         var response_buffer = std.ArrayList(u8).init(allocator);
         defer response_buffer.deinit();
 
-        const headers = [_]std.http.Header{};
-        const status = try self.http_client.postJSON(url, &headers, request_json, &response_buffer);
+        const url = try std.fmt.allocPrint(
+            allocator,
+            "{s}/models/{s}:generateContent?key={s}",
+            .{ API_BASE_URL, req.model orelse self.model, self.api_key },
+        );
+        defer allocator.free(url);
 
-        // Parse response
+        std.log.info("[GEMINI_DEBUG] Making HTTP request to: {s}", .{url});
+
+        const status = try self.http_client.postJSON(url, &[_]std.http.Header{}, request_json, &response_buffer);
+
+        std.log.info("[GEMINI_DEBUG] HTTP response status: {}", .{status});
+        std.log.info("[GEMINI_DEBUG] Response length: {}", .{response_buffer.items.len});
+
         return self.parseResponse(allocator, response_buffer.items, status);
     }
 
@@ -215,35 +223,102 @@ pub const GeminiProvider = struct {
     }
 
     /// Build JSON request payload
-    fn buildRequestJSON(
+    pub fn buildRequestJSON(
         self: *Self,
         allocator: std.mem.Allocator,
         req: llm.LLMRequest,
     ) llm.LLMError![]u8 {
-        const user_part = [_]GeminiRequest.Content.Part{
-            .{ .text = req.prompt },
-        };
+        std.log.info("[GEMINI_DEBUG] buildRequestJSON called", .{});
+        std.log.info("[GEMINI_DEBUG] Input request has terminal_context: {}", .{req.terminal_context != null});
 
-        const contents = [_]GeminiRequest.Content{
-            .{ .role = "user", .parts = &user_part },
-        };
+        // Always use the prompt directly - it may already be enhanced with terminal context
+        std.log.info("[GEMINI_DEBUG] Using prompt as-is (may contain enhanced context)", .{});
 
-        const system_part = [_]GeminiRequest.SystemInstruction.Part{
-            .{ .text = req.system_prompt orelse self.system_prompt },
-        };
+        // Build the main prompt (combines system prompt and user prompt for Gemini)
+        const prompt_text = try std.fmt.allocPrint(allocator, "{s}\n\nUser request: {s}", .{ req.system_prompt orelse self.system_prompt, req.prompt });
+        defer allocator.free(prompt_text);
 
-        const generation_config = GeminiRequest.GenerationConfig{
-            .temperature = req.temperature orelse self.temperature,
-            .maxOutputTokens = req.max_tokens orelse self.max_tokens,
-        };
+        const content_part = GeminiRequest.Content.Part{ .text = prompt_text };
+        const content = GeminiRequest.Content{ .role = "user", .parts = &[_]GeminiRequest.Content.Part{content_part} };
+
+        var generation_config = GeminiRequest.GenerationConfig{};
+        if (req.max_tokens) |max_tokens| {
+            generation_config.maxOutputTokens = max_tokens;
+        } else {
+            generation_config.maxOutputTokens = self.max_tokens;
+        }
+        if (req.temperature) |temp| {
+            generation_config.temperature = temp;
+        } else {
+            generation_config.temperature = self.temperature;
+        }
 
         const api_request = GeminiRequest{
-            .contents = &contents,
+            .contents = &[_]GeminiRequest.Content{content},
+            .systemInstruction = GeminiRequest.SystemInstruction{ .parts = &[_]GeminiRequest.SystemInstruction.Part{.{ .text = req.system_prompt orelse self.system_prompt }} },
             .generationConfig = generation_config,
-            .systemInstruction = .{ .parts = &system_part },
         };
 
-        return std.json.stringifyAlloc(allocator, api_request, .{}) catch return llm.LLMError.JSONParseError;
+        std.log.info("[GEMINI_DEBUG] About to stringify JSON for standard request", .{});
+        const json_result = std.json.stringifyAlloc(allocator, api_request, .{}) catch |err| {
+            std.log.err("[GEMINI_DEBUG] JSON stringification failed: {}", .{err});
+            return err;
+        };
+
+        std.log.info("[GEMINI_DEBUG] Standard JSON stringification successful, length: {}", .{json_result.len});
+        return json_result;
+    }
+
+    /// Build JSON request payload with terminal context
+    fn buildPromptWithContext(
+        self: *Self,
+        allocator: std.mem.Allocator,
+        req: llm.LLMRequest,
+        context: llm.TerminalContext,
+    ) llm.LLMError![]u8 {
+        std.log.info("[GEMINI_DEBUG] buildPromptWithContext called", .{});
+        std.log.info("[GEMINI_DEBUG] Terminal context - command_history: '{any}'", .{context.command_history});
+        std.log.info("[GEMINI_DEBUG] Terminal context - current_input: '{any}'", .{context.current_input});
+
+        // Build enhanced prompt with context
+        const enhanced_prompt = std.fmt.allocPrint(allocator, "Recent command history:\n{s}\n\nCurrent terminal input:\n{s}\n\nUser request: {s}", .{ context.command_history orelse "", context.current_input orelse "", req.prompt }) catch {
+            std.log.err("[GEMINI_DEBUG] Failed to build enhanced prompt", .{});
+            return llm.LLMError.OutOfMemory;
+        };
+        defer allocator.free(enhanced_prompt);
+
+        std.log.info("[GEMINI_DEBUG] Built enhanced prompt, length: {}", .{enhanced_prompt.len});
+        std.log.info("[GEMINI_DEBUG] Enhanced prompt preview: {s}", .{enhanced_prompt[0..@min(200, enhanced_prompt.len)]});
+
+        const content_part = GeminiRequest.Content.Part{ .text = enhanced_prompt };
+        const content = GeminiRequest.Content{ .role = "user", .parts = &[_]GeminiRequest.Content.Part{content_part} };
+
+        var generation_config = GeminiRequest.GenerationConfig{};
+        if (req.max_tokens) |max_tokens| {
+            generation_config.maxOutputTokens = max_tokens;
+        } else {
+            generation_config.maxOutputTokens = self.max_tokens;
+        }
+        if (req.temperature) |temp| {
+            generation_config.temperature = temp;
+        } else {
+            generation_config.temperature = self.temperature;
+        }
+
+        const api_request = GeminiRequest{
+            .contents = &[_]GeminiRequest.Content{content},
+            .systemInstruction = GeminiRequest.SystemInstruction{ .parts = &[_]GeminiRequest.SystemInstruction.Part{.{ .text = req.system_prompt orelse self.system_prompt }} },
+            .generationConfig = generation_config,
+        };
+
+        std.log.info("[GEMINI_DEBUG] About to stringify JSON for context request", .{});
+        const json_result = std.json.stringifyAlloc(allocator, api_request, .{}) catch |err| {
+            std.log.err("[GEMINI_DEBUG] Context JSON stringification failed: {}", .{err});
+            return err;
+        };
+
+        std.log.info("[GEMINI_DEBUG] Context JSON stringification successful, length: {}", .{json_result.len});
+        return json_result;
     }
 
     /// Parse API response into LLMResponse
@@ -598,14 +673,8 @@ test "Gemini basic response parsing" {
         \\    "candidates": [
         \\        {
         \\            "content": {
-        \\                "parts": [
-        \\                    {
-        \\                        "text": "ls -la"
-        \\                    }
-        \\                ],
-        \\                "role": "model"
-        \\            },
-        \\            "finishReason": "STOP"
+        \\                "parts": [{ "text": "ls -la" }]
+        \\            }
         \\        }
         \\    ]
         \\}
@@ -627,7 +696,24 @@ test "Gemini basic response parsing" {
     allocator.free(response.command);
 }
 
-// Gemini streaming tests removed - streaming functionality intentionally disabled
+test "Gemini streaming disabled" {
+    const allocator = testing.allocator;
+
+    const mock_client = MockHTTPClient{ .response_chunks = &[_][]const u8{} };
+    var provider = createTestProvider(allocator, mock_client);
+    defer provider.deinit();
+
+    var context = TestStreamContext.init(allocator);
+    defer context.deinit();
+
+    const request = llm.LLMRequest{ .prompt = "list files" };
+
+    // Streaming should now return UnsupportedProvider error
+    try testing.expectError(
+        llm.LLMError.UnsupportedProvider,
+        provider.requestStream(allocator, request, TestStreamContext.streamCallback, &context),
+    );
+}
 
 test "Gemini error response" {
     const allocator = testing.allocator;
@@ -669,11 +755,7 @@ test "Gemini command text cleaning" {
         \\    "candidates": [
         \\        {
         \\            "content": {
-        \\                "parts": [
-        \\                    {
-        \\                        "text": "```bash\nls -la\n```"
-        \\                    }
-        \\                ]
+        \\                "parts": [{ "text": "```bash\nls -la\n```" }]
         \\            }
         \\        }
         \\    ]

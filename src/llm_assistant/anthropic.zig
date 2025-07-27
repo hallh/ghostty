@@ -144,25 +144,32 @@ pub const AnthropicProvider = struct {
     ) llm.LLMError!llm.LLMResponse {
         const self: *AnthropicProvider = @ptrCast(@alignCast(ptr));
 
-        // Build request JSON
+        std.log.info("[ANTHROPIC_DEBUG] Starting request with prompt length: {}", .{req.prompt.len});
+        std.log.info("[ANTHROPIC_DEBUG] Request has terminal_context: {}", .{req.terminal_context != null});
+
         const request_json = try self.buildRequestJSON(allocator, req, false);
         defer allocator.free(request_json);
 
-        // Prepare headers
+        std.log.info("[ANTHROPIC_DEBUG] Generated JSON length: {}", .{request_json.len});
+        std.log.info("[ANTHROPIC_DEBUG] JSON preview: {s}", .{request_json[0..@min(500, request_json.len)]});
+
         const headers = [_]std.http.Header{
             .{ .name = "x-api-key", .value = self.api_key },
             .{ .name = "anthropic-version", .value = "2023-06-01" },
-            .{ .name = "anthropic-beta", .value = "messages-2023-12-15" },
         };
 
-        // Make HTTP request
         var response_buffer = std.ArrayList(u8).init(allocator);
         defer response_buffer.deinit();
 
         const url = API_BASE_URL ++ "/messages";
+
+        std.log.info("[ANTHROPIC_DEBUG] Making HTTP request to: {s}", .{url});
+
         const status = try self.http_client.postJSON(url, &headers, request_json, &response_buffer);
 
-        // Parse response
+        std.log.info("[ANTHROPIC_DEBUG] HTTP response status: {}", .{status});
+        std.log.info("[ANTHROPIC_DEBUG] Response length: {}", .{response_buffer.items.len});
+
         return self.parseResponse(allocator, response_buffer.items, status);
     }
 
@@ -180,12 +187,18 @@ pub const AnthropicProvider = struct {
     }
 
     /// Build JSON request payload
-    fn buildRequestJSON(
+    pub fn buildRequestJSON(
         self: *Self,
         allocator: std.mem.Allocator,
         req: llm.LLMRequest,
         stream: bool,
     ) llm.LLMError![]u8 {
+        std.log.info("[ANTHROPIC_DEBUG] buildRequestJSON called", .{});
+        std.log.info("[ANTHROPIC_DEBUG] Input request has terminal_context: {}", .{req.terminal_context != null});
+
+        // Always use the prompt directly - it may already be enhanced with terminal context
+        std.log.info("[ANTHROPIC_DEBUG] Using prompt as-is (may contain enhanced context)", .{});
+
         const messages = [_]AnthropicRequest.Message{
             .{ .role = "user", .content = req.prompt },
         };
@@ -199,7 +212,59 @@ pub const AnthropicProvider = struct {
             .stream = stream,
         };
 
-        return std.json.stringifyAlloc(allocator, api_request, .{}) catch return llm.LLMError.JSONParseError;
+        std.log.info("[ANTHROPIC_DEBUG] About to stringify JSON for standard request", .{});
+        const json_result = std.json.stringifyAlloc(allocator, api_request, .{}) catch |err| {
+            std.log.err("[ANTHROPIC_DEBUG] JSON stringification failed: {}", .{err});
+            return err;
+        };
+
+        std.log.info("[ANTHROPIC_DEBUG] Standard JSON stringification successful, length: {}", .{json_result.len});
+        return json_result;
+    }
+
+    /// Build JSON for requests with terminal context
+    fn buildPromptWithContext(
+        self: *Self,
+        allocator: std.mem.Allocator,
+        req: llm.LLMRequest,
+        context: llm.TerminalContext,
+        stream: bool,
+    ) llm.LLMError![]u8 {
+        std.log.info("[ANTHROPIC_DEBUG] buildPromptWithContext called", .{});
+        std.log.info("[ANTHROPIC_DEBUG] Terminal context - command_history: '{any}'", .{context.command_history});
+        std.log.info("[ANTHROPIC_DEBUG] Terminal context - current_input: '{any}'", .{context.current_input});
+
+        // Build enhanced prompt with context
+        const enhanced_prompt = std.fmt.allocPrint(allocator, "Recent command history:\n{s}\n\nCurrent terminal input:\n{s}\n\nUser request: {s}", .{ context.command_history orelse "", context.current_input orelse "", req.prompt }) catch {
+            std.log.err("[ANTHROPIC_DEBUG] Failed to build enhanced prompt", .{});
+            return llm.LLMError.OutOfMemory;
+        };
+        defer allocator.free(enhanced_prompt);
+
+        std.log.info("[ANTHROPIC_DEBUG] Built enhanced prompt, length: {}", .{enhanced_prompt.len});
+        std.log.info("[ANTHROPIC_DEBUG] Enhanced prompt preview: {s}", .{enhanced_prompt[0..@min(200, enhanced_prompt.len)]});
+
+        const messages = [_]AnthropicRequest.Message{
+            .{ .role = "user", .content = enhanced_prompt },
+        };
+
+        const api_request = AnthropicRequest{
+            .model = req.model orelse self.model,
+            .max_tokens = req.max_tokens orelse self.max_tokens,
+            .temperature = req.temperature orelse self.temperature,
+            .system = req.system_prompt orelse self.system_prompt,
+            .messages = &messages,
+            .stream = stream,
+        };
+
+        std.log.info("[ANTHROPIC_DEBUG] About to stringify JSON for context request", .{});
+        const json_result = std.json.stringifyAlloc(allocator, api_request, .{}) catch |err| {
+            std.log.err("[ANTHROPIC_DEBUG] Context JSON stringification failed: {}", .{err});
+            return err;
+        };
+
+        std.log.info("[ANTHROPIC_DEBUG] Context JSON stringification successful, length: {}", .{json_result.len});
+        return json_result;
     }
 
     /// Parse API response into LLMResponse
