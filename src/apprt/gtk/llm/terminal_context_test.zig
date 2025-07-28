@@ -8,12 +8,10 @@ test "TerminalContext.init and deinit" {
     const allocator = arena.allocator();
 
     var context = terminal_context.TerminalContext{
-        .commands = std.ArrayList(terminal_context.TerminalContext.CommandEntry).init(allocator),
         .current_input_full_line = null,
         .allocator = allocator,
     };
 
-    try testing.expect(context.commands.items.len == 0);
     try testing.expect(context.current_input_full_line == null);
 
     context.deinit();
@@ -25,23 +23,10 @@ test "TerminalContext.deinit with data" {
     const allocator = arena.allocator();
 
     var context = terminal_context.TerminalContext{
-        .commands = std.ArrayList(terminal_context.TerminalContext.CommandEntry).init(allocator),
         .current_input_full_line = try allocator.dupe(u8, "test content"),
         .allocator = allocator,
     };
 
-    // Add some command entries
-    try context.commands.append(.{
-        .command = try allocator.dupe(u8, "ls -la"),
-        .output = try allocator.dupe(u8, "file1.txt\nfile2.txt"),
-    });
-
-    try context.commands.append(.{
-        .command = try allocator.dupe(u8, "pwd"),
-        .output = try allocator.dupe(u8, "/home/user"),
-    });
-
-    try testing.expect(context.commands.items.len == 2);
     try testing.expect(context.current_input_full_line != null);
 
     // Should not leak memory
@@ -69,24 +54,6 @@ test "getTerminalContext error handling" {
     try testing.expect(result == null);
 }
 
-test "CommandEntry structure" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    // Test that CommandEntry can be created and holds data correctly
-    const entry = terminal_context.TerminalContext.CommandEntry{
-        .command = try allocator.dupe(u8, "test command"),
-        .output = try allocator.dupe(u8, "test output"),
-    };
-
-    try testing.expectEqualStrings("test command", entry.command);
-    try testing.expectEqualStrings("test output", entry.output);
-
-    allocator.free(entry.command);
-    allocator.free(entry.output);
-}
-
 test "TerminalContext memory management" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -95,7 +62,6 @@ test "TerminalContext memory management" {
     // Test creating and destroying multiple contexts
     for (0..5) |i| {
         var context = terminal_context.TerminalContext{
-            .commands = std.ArrayList(terminal_context.TerminalContext.CommandEntry).init(allocator),
             .current_input_full_line = null,
             .allocator = allocator,
         };
@@ -105,42 +71,20 @@ test "TerminalContext memory management" {
         const content = try std.fmt.bufPrint(buf[0..], "test content {}", .{i});
         context.current_input_full_line = try allocator.dupe(u8, content);
 
-        try context.commands.append(.{
-            .command = try allocator.dupe(u8, "test command"),
-            .output = try allocator.dupe(u8, "test output"),
-        });
-
         context.deinit();
     }
 }
 
-test "TerminalContext with many commands" {
+test "TerminalContext with content" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
     var context = terminal_context.TerminalContext{
-        .commands = std.ArrayList(terminal_context.TerminalContext.CommandEntry).init(allocator),
-        .current_input_full_line = try allocator.dupe(u8, "current line"),
+        .current_input_full_line = try allocator.dupe(u8, "current line content"),
         .allocator = allocator,
     };
     defer context.deinit();
 
-    // Add many command entries to test scaling
-    for (0..100) |i| {
-        var cmd_buf: [50]u8 = undefined;
-        var out_buf: [50]u8 = undefined;
-
-        const cmd = try std.fmt.bufPrint(cmd_buf[0..], "command_{}", .{i});
-        const output = try std.fmt.bufPrint(out_buf[0..], "output_{}", .{i});
-
-        try context.commands.append(.{
-            .command = try allocator.dupe(u8, cmd),
-            .output = try allocator.dupe(u8, output),
-        });
-    }
-
-    try testing.expect(context.commands.items.len == 100);
-    try testing.expectEqualStrings("command_0", context.commands.items[0].command);
-    try testing.expectEqualStrings("command_99", context.commands.items[99].command);
+    try testing.expectEqualStrings("current line content", context.current_input_full_line.?);
 }

@@ -10,7 +10,6 @@ test "createEnhancedPrompt with terminal context" {
 
     // Create a test terminal context
     var context = terminal_context.TerminalContext{
-        .commands = std.ArrayList(terminal_context.TerminalContext.CommandEntry).init(allocator),
         .current_input_full_line = try allocator.dupe(u8, " 1: ls -la\n 2: cd /home\n 3: pwd !!CURSOR!!"),
         .allocator = allocator,
     };
@@ -37,7 +36,6 @@ test "createEnhancedPrompt without terminal context" {
 
     // Create context without current_input_full_line
     var context = terminal_context.TerminalContext{
-        .commands = std.ArrayList(terminal_context.TerminalContext.CommandEntry).init(allocator),
         .current_input_full_line = null,
         .allocator = allocator,
     };
@@ -62,7 +60,6 @@ test "createEnhancedPrompt with empty user prompt" {
     const allocator = arena.allocator();
 
     var context = terminal_context.TerminalContext{
-        .commands = std.ArrayList(terminal_context.TerminalContext.CommandEntry).init(allocator),
         .current_input_full_line = try allocator.dupe(u8, "test content"),
         .allocator = allocator,
     };
@@ -82,7 +79,6 @@ test "createEnhancedPrompt memory management" {
     const allocator = arena.allocator();
 
     var context = terminal_context.TerminalContext{
-        .commands = std.ArrayList(terminal_context.TerminalContext.CommandEntry).init(allocator),
         .current_input_full_line = try allocator.dupe(u8, "test"),
         .allocator = allocator,
     };

@@ -8,21 +8,10 @@ const Pin = terminal.Pin;
 const Surface = @import("../Surface.zig");
 
 pub const TerminalContext = struct {
-    commands: std.ArrayList(CommandEntry),
     current_input_full_line: ?[]u8 = null, // Full line with decorations and cursor marker
     allocator: std.mem.Allocator,
 
-    pub const CommandEntry = struct {
-        command: []u8,
-        output: []u8,
-    };
-
     pub fn deinit(self: *TerminalContext) void {
-        for (self.commands.items) |entry| {
-            self.allocator.free(entry.command);
-            self.allocator.free(entry.output);
-        }
-        self.commands.deinit();
         if (self.current_input_full_line) |full_line| {
             self.allocator.free(full_line);
         }
@@ -34,7 +23,6 @@ pub fn getTerminalContext(allocator: std.mem.Allocator, surface: ?*Surface) !?Te
     if (surface == null) return null;
 
     var context = TerminalContext{
-        .commands = std.ArrayList(TerminalContext.CommandEntry).init(allocator),
         .allocator = allocator,
     };
 

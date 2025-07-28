@@ -477,6 +477,9 @@ pub fn updateConfig(
 
     // Update binds inside the command palette
     try self.command_palette.updateConfig(config);
+
+    // Update LLM assistant dialog config
+    self.llm_assistant_dialog.updateConfig();
 }
 
 /// Updates appearance based on config settings. Will be called once upon window

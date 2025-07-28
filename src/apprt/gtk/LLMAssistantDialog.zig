@@ -193,6 +193,21 @@ pub fn show(self: *LLMAssistantDialog) void {
     self.updateShortcutsHint();
 }
 
+pub fn updateConfig(self: *LLMAssistantDialog) void {
+    // Clean up existing provider if it exists
+    if (self.llm_provider) |provider| {
+        provider.deinit(self.arena.allocator());
+        self.llm_provider = null;
+    }
+
+    // Reinitialize provider with new config
+    self.initLLMProvider() catch |err| {
+        log.warn("Failed to reinitialize LLM provider after config update: {}", .{err});
+        // Don't fail the update, just log the error
+        // The dialog will show an appropriate error when the user tries to use it
+    };
+}
+
 fn initLLMProvider(self: *LLMAssistantDialog) !void {
     self.llm_provider = llm.createProvider(
         self.arena.allocator(),
@@ -353,9 +368,7 @@ fn submitRequest(self: *LLMAssistantDialog) void {
 
     log.info("[LLM_DEBUG] Terminal context available: {}", .{terminal_context != null});
     if (terminal_context) |ctx| {
-        log.info("[LLM_DEBUG] Command history length: {}", .{ctx.commands.items.len});
         log.info("[LLM_DEBUG] Current input full line: '{any}'", .{ctx.current_input_full_line});
-        log.info("[LLM_DEBUG] First few commands: {s}", .{if (ctx.commands.items.len > 0) ctx.commands.items[0].command else "none"});
     }
 
     // Create enhanced prompt with context
@@ -369,38 +382,9 @@ fn submitRequest(self: *LLMAssistantDialog) void {
     log.info("[LLM_DEBUG] Enhanced prompt length: {}", .{enhanced_prompt.len});
     log.info("[LLM_DEBUG] Enhanced prompt preview: '{s}'", .{enhanced_prompt});
 
-    // Convert local TerminalContext to LLM TerminalContext if available
-    const llm_context = if (terminal_context) |ctx| blk: {
-        // Convert command history to string format
-        var history_builder = std.ArrayList(u8).init(self.arena.allocator());
-        defer history_builder.deinit();
+    // No need to convert terminal context since we're passing it directly to the worker
 
-        for (ctx.commands.items, 0..) |entry, i| {
-            const command_num = ctx.commands.items.len - i;
-            history_builder.writer().print("## {}\nCommand: `{s}`\nOutput:\n```\n{s}\n```\n\n", .{ command_num, entry.command, entry.output }) catch {
-                log.warn("Failed to format command history", .{});
-                break;
-            };
-        }
-
-        const history_str = if (history_builder.items.len > 0)
-            self.arena.allocator().dupe(u8, history_builder.items) catch null
-        else
-            null;
-
-        break :blk llm.TerminalContext{
-            .command_history = history_str,
-        };
-    } else null;
-
-    // Create request
-    const request = llm.LLMRequest{
-        .prompt = enhanced_prompt,
-        .terminal_context = llm_context,
-    };
-
-    log.info("[LLM_DEBUG] Created LLMRequest with prompt length: {}", .{request.prompt.len});
-    log.info("[LLM_DEBUG] LLMRequest.terminal_context is: {}", .{request.terminal_context != null});
+    log.info("[LLM_DEBUG] Enhanced prompt ready with length: {}", .{enhanced_prompt.len});
 
     // Create worker request with terminal context
     const worker_request = llm_worker.WorkerRequest{
@@ -431,9 +415,11 @@ fn onWorkerResponse(response: llm_worker.WorkerResponse, user_data: ?*anyopaque)
         if (response.response) |text| {
             self.showResponse(text);
         } else {
+            self.stopLoading();
             self.showError("Received empty response from LLM");
         }
     } else {
+        self.stopLoading();
         const error_msg = if (response.error_message) |msg| msg else "Unknown error occurred";
         self.showError(error_msg);
     }

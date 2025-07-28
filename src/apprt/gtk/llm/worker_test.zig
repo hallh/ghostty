@@ -31,7 +31,6 @@ test "WorkerRequest.deinit with terminal context" {
     const prompt_copy = try allocator.dupe(u8, "test prompt");
 
     const context = terminal_context.TerminalContext{
-        .commands = std.ArrayList(terminal_context.TerminalContext.CommandEntry).init(allocator),
         .current_input_full_line = try allocator.dupe(u8, "test context"),
         .allocator = allocator,
     };
