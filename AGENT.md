@@ -86,8 +86,9 @@ The apprt layer abstracts platform-specific windowing and event handling:
 - **Purpose**: Provides unified interface across platforms
 - **Key Files**:
   - `src/apprt/embedded.zig` - C API for external integration
-  - `src/apprt/gtk/` - GTK3 implementation
+  - `src/apprt/gtk/` - GTK3 implementation  
   - `src/apprt/gtk-ng/` - GTK4/libadwaita implementation
+  - `src/apprt/gtk/llm/` - GTK LLM assistant UI helper modules
 - **Communication**: Uses message passing and mailboxes for thread safety
 
 ### 2. Configuration System (`src/config/`)
@@ -145,6 +146,17 @@ Advanced font handling and text shaping:
 - **Fallback**: Automatic font fallback chains
 - **Caching**: Glyph atlas and shaping result caching
 - **Features**: Ligatures, emoji, international text support
+
+### 8. LLM Assistant (`src/llm_assistant/`)
+
+AI-powered command generation with multi-provider support:
+
+- **Architecture**: Modular provider system with shared base functionality
+- **Providers**: Anthropic, OpenAI, and Gemini integrations
+- **Key Files**:
+  - `src/llm_assistant/provider_base.zig` - Shared provider functionality
+  - `src/apprt/gtk/llm/` - GTK UI helper modules (history, context, worker, prompt building)
+- **Features**: Terminal context capture, background processing, prompt history
 
 ## Shortcuts and Keybindings
 

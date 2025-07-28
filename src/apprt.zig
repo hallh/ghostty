@@ -83,4 +83,10 @@ test {
     _ = runtime;
     _ = action;
     _ = structs;
+
+    // GTK LLM helper module tests
+    _ = @import("apprt/gtk/llm/history_test.zig");
+    _ = @import("apprt/gtk/llm/prompt_builder_test.zig");
+    _ = @import("apprt/gtk/llm/terminal_context_test.zig");
+    _ = @import("apprt/gtk/llm/worker_test.zig");
 }

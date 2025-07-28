@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const log = std.log.scoped(.llm_terminal_context);
 
 const terminal = @import("../../../terminal/main.zig");
@@ -11,7 +12,7 @@ pub const TerminalContext = struct {
     current_input_full_line: ?[]u8 = null, // Full line with decorations and cursor marker
     allocator: std.mem.Allocator,
 
-    const CommandEntry = struct {
+    pub const CommandEntry = struct {
         command: []u8,
         output: []u8,
     };
@@ -52,7 +53,9 @@ fn captureRecentTerminalLines(surface: *Surface, context: *TerminalContext) !voi
     const screen = &surface.core_surface.io.terminal.screen;
     const cursor_pin = screen.cursor.page_pin.*;
 
-    log.debug("Capturing recent terminal content around cursor position y={}", .{cursor_pin.y});
+    if (comptime builtin.mode == .Debug) {
+        log.debug("Capturing recent terminal content around cursor position y={}", .{cursor_pin.y});
+    }
 
     const max_chars = 5000;
     var terminal_content = std.ArrayList(u8).init(context.allocator);
@@ -163,7 +166,9 @@ fn captureRecentTerminalLines(surface: *Surface, context: *TerminalContext) !voi
     // Store the terminal content as current_input_full_line for backward compatibility
     context.current_input_full_line = try context.allocator.dupe(u8, terminal_content.items);
 
-    log.debug("Captured {} characters of terminal content ({} lines)", .{ total_chars, line_num - 1 });
+    if (comptime builtin.mode == .Debug) {
+        log.debug("Captured {} characters of terminal content ({} lines)", .{ total_chars, line_num - 1 });
+    }
 }
 
 /// Capture a single row's text with cursor marker inserted at cursor position

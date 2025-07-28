@@ -236,6 +236,17 @@ Each provider offers different models with varying capabilities:
 - `gemini-1.5-flash` (default) - Fast and efficient
 - `gemini-1.5-pro` - More capable for complex requests
 
+## Architecture
+
+The LLM Command Assistant uses a modular architecture:
+
+- **Provider Base** (`src/llm_assistant/provider_base.zig`): Shared functionality and defaults across all providers
+- **Individual Providers**: Anthropic, OpenAI, and Gemini implementations that extend the base
+- **Terminal Context**: Smart capture of terminal state to provide relevant context to AI
+- **Background Processing**: LLM requests run in separate threads to keep UI responsive
+
+All providers share common configuration defaults and text cleaning logic through the provider base, ensuring consistent behavior while allowing provider-specific optimizations.
+
 ## Contributing
 
 The LLM Command Assistant is part of Ghostty's source code. To contribute:

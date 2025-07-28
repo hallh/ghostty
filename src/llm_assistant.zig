@@ -183,6 +183,7 @@ const GeminiProvider = @import("llm_assistant/gemini.zig");
 // Test imports - ensures all tests are discoverable by `zig build test`
 test {
     _ = @import("llm_assistant/integration_test.zig");
+    _ = @import("llm_assistant/provider_base_test.zig");
 
     // Reference provider tests to ensure they're included
     _ = @import("llm_assistant/openai.zig");
