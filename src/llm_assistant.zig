@@ -22,9 +22,6 @@ pub const LLMError = error{
     UnsupportedProvider,
 };
 
-/// Callback for streaming responses
-pub const StreamCallback = *const fn (chunk: []const u8, user_data: ?*anyopaque) void;
-
 /// Base interface for all LLM providers
 pub const LLMProvider = struct {
     ptr: *anyopaque,
@@ -32,13 +29,6 @@ pub const LLMProvider = struct {
 
     pub const Vtable = struct {
         request: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator, req: LLMRequest) LLMError!LLMResponse,
-        requestStream: *const fn (
-            ptr: *anyopaque,
-            allocator: std.mem.Allocator,
-            req: LLMRequest,
-            callback: StreamCallback,
-            user_data: ?*anyopaque,
-        ) LLMError!void,
         deinit: *const fn (ptr: *anyopaque, allocator: std.mem.Allocator) void,
     };
 
@@ -48,16 +38,6 @@ pub const LLMProvider = struct {
 
     pub fn request(self: LLMProvider, allocator: std.mem.Allocator, req: LLMRequest) !LLMResponse {
         return self.vtable.request(self.ptr, allocator, req);
-    }
-
-    pub fn requestStream(
-        self: LLMProvider,
-        allocator: std.mem.Allocator,
-        req: LLMRequest,
-        callback: StreamCallback,
-        user_data: ?*anyopaque,
-    ) !void {
-        return self.vtable.requestStream(self.ptr, allocator, req, callback, user_data);
     }
 };
 
@@ -88,7 +68,6 @@ pub const LLMResponse = struct {
 /// Terminal context for richer prompts
 pub const TerminalContext = struct {
     command_history: ?[]const u8 = null,
-    current_input: ?[]const u8 = null,
 };
 
 /// HTTP client wrapper for LLM API calls
@@ -147,75 +126,6 @@ pub const HTTPClient = struct {
         };
 
         return result.status;
-    }
-
-    /// Make a streaming POST request for Server-Sent Events
-    pub fn postJSONStream(
-        self: *Self,
-        url: []const u8,
-        headers: []const std.http.Header,
-        json_payload: []const u8,
-        callback: StreamCallback,
-        user_data: ?*anyopaque,
-    ) LLMError!void {
-        const uri = std.Uri.parse(url) catch return LLMError.InvalidConfiguration;
-
-        var server_header_buffer: [16 * 1024]u8 = undefined;
-        var req = self.client.open(.POST, uri, .{
-            .server_header_buffer = &server_header_buffer,
-            .headers = .{ .content_type = .{ .override = "application/json" } },
-            .extra_headers = headers,
-        }) catch |err| switch (err) {
-            error.ConnectionRefused,
-            error.NetworkUnreachable,
-            error.ConnectionTimedOut,
-            error.UnknownHostName,
-            error.TemporaryNameServerFailure,
-            => return LLMError.NetworkError,
-
-            error.OutOfMemory => return LLMError.OutOfMemory,
-
-            else => {
-                log.err("HTTP stream request failed: {}", .{err});
-                return LLMError.NetworkError;
-            },
-        };
-        defer req.deinit();
-
-        // Set request payload
-        req.transfer_encoding = .{ .content_length = json_payload.len };
-
-        // Send request
-        req.send() catch return LLMError.NetworkError;
-        req.writeAll(json_payload) catch return LLMError.NetworkError;
-        req.finish() catch return LLMError.NetworkError;
-        req.wait() catch return LLMError.NetworkError;
-
-        // Check response status
-        if (req.response.status.class() != .success) {
-            log.err("HTTP stream request failed with status: {}", .{req.response.status});
-            return LLMError.APIError;
-        }
-
-        // Read streaming response
-        var line_buffer: [8192]u8 = undefined;
-        var reader = req.reader();
-
-        while (true) {
-            if (reader.readUntilDelimiterOrEof(line_buffer[0..], '\n') catch null) |line| {
-                if (line.len == 0) continue; // Skip empty lines
-
-                // Handle Server-Sent Events format
-                if (std.mem.startsWith(u8, line, "data: ")) {
-                    const data = line[6..]; // Skip "data: " prefix
-                    if (std.mem.eql(u8, data, "[DONE]")) break; // End of stream
-
-                    callback(data, user_data);
-                }
-            } else {
-                break; // End of stream
-            }
-        }
     }
 };
 

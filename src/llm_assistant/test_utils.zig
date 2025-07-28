@@ -39,7 +39,6 @@ pub const MockLLMProvider = struct {
 
     const vtable = llm.LLMProvider.Vtable{
         .request = request,
-        .requestStream = requestStream,
         .deinit = deinitProvider,
     };
 
@@ -67,33 +66,6 @@ pub const MockLLMProvider = struct {
             .error_message = error_msg,
             .is_final = true,
         };
-    }
-
-    fn requestStream(
-        ptr: *anyopaque,
-        allocator: std.mem.Allocator,
-        req: llm.LLMRequest,
-        callback: llm.StreamCallback,
-        user_data: ?*anyopaque,
-    ) llm.LLMError!void {
-        const self: *Self = @ptrCast(@alignCast(ptr));
-
-        _ = allocator; // unused
-        _ = req; // unused
-
-        if (self.error_to_return) |err| {
-            return err;
-        }
-
-        // Send stream chunks
-        for (self.stream_chunks) |chunk| {
-            callback(chunk, user_data);
-        }
-
-        // Return error after sending chunks if configured
-        if (self.stream_error_after_chunks) |err| {
-            return err;
-        }
     }
 
     fn deinitProvider(ptr: *anyopaque, allocator: std.mem.Allocator) void {

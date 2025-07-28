@@ -20,6 +20,14 @@ const Screen = terminal.Screen;
 const PageList = terminal.PageList;
 const Pin = terminal.Pin;
 
+// LLM helper modules
+const llm_terminal_context = @import("llm/terminal_context.zig");
+const llm_prompt_builder = @import("llm/prompt_builder.zig");
+const llm_history = @import("llm/history.zig");
+const llm_worker = @import("llm/worker.zig");
+const LLMTerminalContext = llm_terminal_context.TerminalContext;
+const HistoryManager = llm_history.History;
+
 const log = std.log.scoped(.llm_assistant_dialog);
 
 window: *Window,
@@ -44,8 +52,7 @@ shortcuts_hint: *gtk.Label,
 llm_provider: ?llm.LLMProvider = null,
 is_loading: bool = false,
 pulse_timer: ?c_uint = null,
-history: std.ArrayList([:0]u8),
-history_index: ?usize = null,
+history_manager: HistoryManager,
 current_response: ?[]u8 = null,
 
 pub fn init(self: *LLMAssistantDialog, window: *Window) !void {
@@ -68,7 +75,7 @@ pub fn init(self: *LLMAssistantDialog, window: *Window) !void {
         .clear_button = builder.getObject(gtk.Button, "clear-button").?,
         .accept_button = builder.getObject(gtk.Button, "accept-button").?,
         .shortcuts_hint = builder.getObject(gtk.Label, "shortcuts-hint").?,
-        .history = std.ArrayList([:0]u8).init(window.app.core_app.alloc),
+        .history_manager = HistoryManager.init(window.app.core_app.alloc),
     };
 
     // Get the text buffer for the suggestion text view
@@ -168,10 +175,7 @@ pub fn deinit(self: *LLMAssistantDialog) void {
     }
 
     // Clean up history
-    for (self.history.items) |item| {
-        self.arena.allocator().free(item);
-    }
-    self.history.deinit();
+    self.history_manager.deinit();
 
     self.arena.deinit();
     self.dialog.unref();
@@ -268,11 +272,11 @@ fn onKeyPressed(
 ) callconv(.c) c_int {
     switch (keyval) {
         gdk.KEY_Up => {
-            self.navigateHistory(.previous);
+            self.history_manager.navigate(.previous, self.prompt_entry);
             return 1; // TRUE - event handled
         },
         gdk.KEY_Down => {
-            self.navigateHistory(.next);
+            self.history_manager.navigate(.next, self.prompt_entry);
             return 1; // TRUE - event handled
         },
         gdk.KEY_Return, gdk.KEY_KP_Enter => {
@@ -333,7 +337,7 @@ fn submitRequest(self: *LLMAssistantDialog) void {
     };
 
     // Add to history
-    self.addToHistory(text) catch |err| {
+    self.history_manager.addEntry(text) catch |err| {
         log.warn("Failed to add prompt to history: {}", .{err});
     };
 
@@ -341,7 +345,8 @@ fn submitRequest(self: *LLMAssistantDialog) void {
     self.startLoading();
 
     // Get terminal context if available
-    const terminal_context = self.getTerminalContext() catch |err| blk: {
+    const active_surface = self.getActiveSurface();
+    const terminal_context = llm_terminal_context.getTerminalContext(self.arena.allocator(), active_surface) catch |err| blk: {
         log.warn("Failed to get terminal context: {}", .{err});
         break :blk null;
     };
@@ -349,7 +354,7 @@ fn submitRequest(self: *LLMAssistantDialog) void {
     log.info("[LLM_DEBUG] Terminal context available: {}", .{terminal_context != null});
     if (terminal_context) |ctx| {
         log.info("[LLM_DEBUG] Command history length: {}", .{ctx.commands.items.len});
-        log.info("[LLM_DEBUG] Current input: '{any}'", .{ctx.current_input});
+        log.info("[LLM_DEBUG] Current input full line: '{any}'", .{ctx.current_input_full_line});
         log.info("[LLM_DEBUG] First few commands: {s}", .{if (ctx.commands.items.len > 0) ctx.commands.items[0].command else "none"});
     }
 
@@ -362,7 +367,7 @@ fn submitRequest(self: *LLMAssistantDialog) void {
 
     log.info("[LLM_DEBUG] Original prompt: '{s}'", .{text});
     log.info("[LLM_DEBUG] Enhanced prompt length: {}", .{enhanced_prompt.len});
-    log.info("[LLM_DEBUG] Enhanced prompt preview: '{s}'", .{enhanced_prompt[0..@min(100, enhanced_prompt.len)]});
+    log.info("[LLM_DEBUG] Enhanced prompt preview: '{s}'", .{enhanced_prompt});
 
     // Convert local TerminalContext to LLM TerminalContext if available
     const llm_context = if (terminal_context) |ctx| blk: {
@@ -385,7 +390,6 @@ fn submitRequest(self: *LLMAssistantDialog) void {
 
         break :blk llm.TerminalContext{
             .command_history = history_str,
-            .current_input = ctx.current_input,
         };
     } else null;
 
@@ -398,175 +402,60 @@ fn submitRequest(self: *LLMAssistantDialog) void {
     log.info("[LLM_DEBUG] Created LLMRequest with prompt length: {}", .{request.prompt.len});
     log.info("[LLM_DEBUG] LLMRequest.terminal_context is: {}", .{request.terminal_context != null});
 
-    // Submit blocking request in a separate thread to avoid blocking UI
-    const RequestContext = struct {
-        dialog: *LLMAssistantDialog,
-        provider: llm.LLMProvider,
-        request: llm.LLMRequest,
-        allocator: std.mem.Allocator,
-        enhanced_prompt: []const u8, // Keep track of enhanced prompt for cleanup
-        original_prompt: []const u8, // Keep track of original prompt for comparison
-    };
-
-    const context = self.arena.allocator().create(RequestContext) catch |err| {
-        // Clean up enhanced_prompt if it was allocated
-        if (enhanced_prompt.ptr != text.ptr) self.arena.allocator().free(enhanced_prompt);
-        self.stopLoading();
-        self.showError("Memory allocation failed");
-        log.err("Failed to allocate request context: {}", .{err});
-        return;
-    };
-
-    context.* = RequestContext{
-        .dialog = self,
-        .provider = provider,
-        .request = request,
-        .allocator = self.arena.allocator(),
-        .enhanced_prompt = enhanced_prompt,
-        .original_prompt = text,
-    };
-
-    log.info("[LLM_DEBUG] About to spawn background thread for LLM request", .{});
-
-    // Launch request in background thread
-    const thread = std.Thread.spawn(.{}, requestInBackground, .{context}) catch |err| {
-        // Clean up enhanced_prompt if it was allocated
-        if (enhanced_prompt.ptr != text.ptr) self.arena.allocator().free(enhanced_prompt);
-        self.stopLoading();
-        self.arena.allocator().destroy(context);
-        self.showError("Failed to start background request");
-        log.err("Failed to spawn request thread: {}", .{err});
-        return;
-    };
-    thread.detach(); // Let it run independently
-}
-
-fn requestInBackground(context_ptr: *anyopaque) void {
-    const RequestContext = struct {
-        dialog: *LLMAssistantDialog,
-        provider: llm.LLMProvider,
-        request: llm.LLMRequest,
-        allocator: std.mem.Allocator,
-        enhanced_prompt: []const u8, // Keep track of enhanced prompt for cleanup
-        original_prompt: []const u8, // Keep track of original prompt for comparison
-    };
-
-    const context: *RequestContext = @ptrCast(@alignCast(context_ptr));
-    defer {
-        // Clean up enhanced_prompt if it was allocated
-        if (context.enhanced_prompt.ptr != context.original_prompt.ptr) {
-            context.allocator.free(context.enhanced_prompt);
-        }
-        context.allocator.destroy(context);
-    }
-
-    log.info("[LLM_DEBUG] Background thread started, about to make provider request", .{});
-    log.info("[LLM_DEBUG] Request prompt length: {}", .{context.request.prompt.len});
-    log.info("[LLM_DEBUG] Request has terminal_context: {}", .{context.request.terminal_context != null});
-
-    // Make blocking request
-    const response = context.provider.request(
-        context.allocator,
-        context.request,
-    ) catch |err| {
-        log.err("[LLM_DEBUG] Provider request failed with error: {}", .{err});
-        // Schedule error display in main thread
-        const error_msg = switch (err) {
-            llm.LLMError.InvalidConfiguration => "Configuration error",
-            llm.LLMError.NetworkError => "Network error - please check your connection",
-            llm.LLMError.AuthenticationError => "Authentication failed - please check your API key",
-            llm.LLMError.RateLimitExceeded => "Rate limit exceeded - please wait and try again",
-            llm.LLMError.APIError => "API error - the service may be unavailable",
-            else => "An unexpected error occurred",
-        };
-
-        // Schedule error display in main thread
-        const error_context = context.allocator.create(ShowErrorContext) catch {
-            log.err("Failed to allocate error context", .{});
+    // Create worker request with terminal context
+    const worker_request = llm_worker.WorkerRequest{
+        .prompt = self.arena.allocator().dupe(u8, enhanced_prompt) catch {
+            self.stopLoading();
+            self.showError("Memory allocation failed");
             return;
-        };
-        error_context.* = ShowErrorContext{
-            .dialog = context.dialog,
-            .message = error_msg,
-        };
-        _ = glib.idleAdd(showRequestError, error_context);
-        return;
+        },
+        .terminal_context = terminal_context,
+        .allocator = self.arena.allocator(),
     };
 
-    // Schedule success handling in main thread
-    const success_context = context.allocator.create(ShowResponseContext) catch |err| {
-        log.err("Failed to allocate success context: {}", .{err});
-        var mutable_response = response;
-        mutable_response.deinit(context.allocator);
-        return;
-    };
+    log.info("[LLM_DEBUG] About to process LLM request using worker module", .{});
 
-    success_context.* = ShowResponseContext{
-        .dialog = context.dialog,
-        .response = response,
-        .allocator = context.allocator,
-    };
-
-    _ = glib.idleAdd(showRequestSuccess, success_context);
+    // Process request using worker module
+    llm_worker.processRequest(
+        provider,
+        worker_request,
+        onWorkerResponse,
+        self,
+    );
 }
 
-const ShowErrorContext = struct {
-    dialog: *LLMAssistantDialog,
-    message: []const u8,
-};
+fn onWorkerResponse(response: llm_worker.WorkerResponse, user_data: ?*anyopaque) void {
+    const self: *LLMAssistantDialog = @ptrCast(@alignCast(user_data.?));
 
-const ShowResponseContext = struct {
-    dialog: *LLMAssistantDialog,
-    response: llm.LLMResponse,
-    allocator: std.mem.Allocator,
-};
-
-fn showRequestError(user_data: ?*anyopaque) callconv(.c) c_int {
-    const error_context: *ShowErrorContext = @ptrCast(@alignCast(user_data.?));
-    const self = error_context.dialog;
-
-    defer {
-        // Clean up the allocated error context
-        self.arena.allocator().destroy(error_context);
-    }
-
-    self.stopLoading();
-    self.showError(error_context.message);
-
-    return 0; // Don't repeat
-}
-
-fn showRequestSuccess(user_data: ?*anyopaque) callconv(.c) c_int {
-    const success_context: *ShowResponseContext = @ptrCast(@alignCast(user_data.?));
-    const self = success_context.dialog;
-
-    defer {
-        var mutable_response = success_context.response;
-        mutable_response.deinit(success_context.allocator);
-        success_context.allocator.destroy(success_context);
-    }
-
-    self.stopLoading();
-
-    // Check for error in response
-    if (success_context.response.error_message) |error_msg| {
+    if (response.success) {
+        if (response.response) |text| {
+            self.showResponse(text);
+        } else {
+            self.showError("Received empty response from LLM");
+        }
+    } else {
+        const error_msg = if (response.error_message) |msg| msg else "Unknown error occurred";
         self.showError(error_msg);
-        return 0;
     }
 
-    // Show successful response
-    if (success_context.response.command.len > 0) {
+    // Response cleanup is handled by the worker module
+}
+
+fn showResponse(self: *LLMAssistantDialog, command_text: []const u8) void {
+    self.stopLoading();
+
+    if (command_text.len > 0) {
         // Update current response
         if (self.current_response) |old_response| {
             self.arena.allocator().free(old_response);
         }
-        self.current_response = self.arena.allocator().dupe(u8, success_context.response.command) catch {
+        self.current_response = self.arena.allocator().dupe(u8, command_text) catch {
             self.showError("Failed to save response");
-            return 0;
+            return;
         };
 
         // Update text buffer
-        self.suggestion_buffer.setText(@ptrCast(success_context.response.command.ptr), @intCast(success_context.response.command.len));
+        self.suggestion_buffer.setText(@ptrCast(command_text.ptr), @intCast(command_text.len));
 
         // Show suggestion UI elements
         gtk.Widget.setVisible(self.suggestion_box.as(gtk.Widget), 1);
@@ -581,8 +470,6 @@ fn showRequestSuccess(user_data: ?*anyopaque) callconv(.c) c_int {
     } else {
         self.showError("No command received from LLM service");
     }
-
-    return 0; // Don't repeat
 }
 
 fn startLoading(self: *LLMAssistantDialog) void {
@@ -690,60 +577,6 @@ fn acceptSuggestion(self: *LLMAssistantDialog) void {
     _ = self.dialog.close();
 }
 
-fn addToHistory(self: *LLMAssistantDialog, text: []const u8) !void {
-    // Don't add duplicates
-    if (self.history.items.len > 0) {
-        const last = self.history.items[self.history.items.len - 1];
-        if (std.mem.eql(u8, last, text)) return;
-    }
-
-    // Add to history (null-terminated for GTK compatibility)
-    const owned_text = try self.arena.allocator().dupeZ(u8, text);
-    try self.history.append(owned_text);
-
-    // Limit history size
-    const max_history = 50; // TODO: Make configurable
-    if (self.history.items.len > max_history) {
-        self.arena.allocator().free(self.history.orderedRemove(0));
-    }
-
-    // Reset history index
-    self.history_index = null;
-}
-
-fn navigateHistory(self: *LLMAssistantDialog, direction: enum { previous, next }) void {
-    if (self.history.items.len == 0) return;
-
-    switch (direction) {
-        .previous => {
-            if (self.history_index) |index| {
-                if (index > 0) {
-                    self.history_index = index - 1;
-                }
-            } else {
-                self.history_index = self.history.items.len - 1;
-            }
-        },
-        .next => {
-            if (self.history_index) |index| {
-                if (index < self.history.items.len - 1) {
-                    self.history_index = index + 1;
-                } else {
-                    self.history_index = null;
-                }
-            }
-        },
-    }
-
-    // Update entry text
-    if (self.history_index) |index| {
-        const text = self.history.items[index];
-        gtk.Editable.setText(self.prompt_entry.as(gtk.Editable), @ptrCast(text.ptr));
-    } else {
-        gtk.Editable.setText(self.prompt_entry.as(gtk.Editable), "");
-    }
-}
-
 fn updateShortcutsHint(self: *LLMAssistantDialog) void {
     const hint_text = if (self.is_loading)
         i18n._("Loading...")
@@ -755,433 +588,13 @@ fn updateShortcutsHint(self: *LLMAssistantDialog) void {
     self.shortcuts_hint.setText(@ptrCast(hint_text));
 }
 
-const TerminalContext = struct {
-    commands: std.ArrayList(CommandEntry),
-    current_input: ?[]u8 = null,
-    current_input_full_line: ?[]u8 = null, // Full line with decorations and cursor marker
-    allocator: std.mem.Allocator,
-
-    const CommandEntry = struct {
-        command: []u8,
-        output: []u8,
-    };
-
-    pub fn deinit(self: *TerminalContext) void {
-        for (self.commands.items) |entry| {
-            self.allocator.free(entry.command);
-            self.allocator.free(entry.output);
-        }
-        self.commands.deinit();
-        if (self.current_input) |input| {
-            self.allocator.free(input);
-        }
-        if (self.current_input_full_line) |full_line| {
-            self.allocator.free(full_line);
-        }
-    }
-};
-
-fn getTerminalContext(self: *LLMAssistantDialog) !?TerminalContext {
+fn getActiveSurface(self: *LLMAssistantDialog) ?*Surface {
     // Get the active surface
     const tab = self.window.notebook.currentTab() orelse return null;
-    const surface = tab.focus_child orelse switch (tab.elem) {
+    return tab.focus_child orelse switch (tab.elem) {
         .surface => |s| s,
         .split => null,
     };
-
-    if (surface == null) return null;
-
-    var context = TerminalContext{
-        .commands = std.ArrayList(TerminalContext.CommandEntry).init(self.arena.allocator()),
-        .allocator = self.arena.allocator(),
-    };
-
-    // Extract terminal context using actual terminal data
-    try self.extractCommandHistory(surface.?, &context);
-    try self.extractCurrentInput(surface.?, &context);
-
-    return context;
-}
-
-/// Extract command history from terminal using semantic prompts
-fn extractCommandHistory(self: *LLMAssistantDialog, surface: *Surface, context: *TerminalContext) !void {
-    const allocator = context.allocator;
-
-    // Access terminal state with proper mutex locking
-    surface.core_surface.renderer_state.mutex.lock();
-    defer surface.core_surface.renderer_state.mutex.unlock();
-
-    const screen = &surface.core_surface.io.terminal.screen;
-
-    // Start from cursor position and scan backwards through terminal history
-    var current_pin = screen.cursor.page_pin.*;
-    const max_commands = 10; // Limit to prevent too much context
-    var commands_found: usize = 0;
-
-    // Scan backwards looking for command/output patterns
-    var it = current_pin.rowIterator(.left_up, null);
-    var current_state: enum { seeking_command, in_command_output, seeking_prompt } = .seeking_command;
-    var command_input: ?[]u8 = null;
-    var output_start_pin: ?Pin = null;
-    var output_end_pin: ?Pin = null;
-
-    while (it.next()) |pin| {
-        if (commands_found >= max_commands) break;
-
-        const row = pin.rowAndCell().row;
-        const semantic_state = row.semantic_prompt;
-
-        switch (current_state) {
-            .seeking_command => {
-                switch (semantic_state) {
-                    .command => {
-                        // Found command output, mark the end and start collecting
-                        if (output_end_pin == null) {
-                            output_end_pin = pin;
-                            output_end_pin.?.x = pin.node.data.size.cols - 1;
-                        }
-                        output_start_pin = pin;
-                        output_start_pin.?.x = 0;
-                        current_state = .in_command_output;
-                    },
-                    .input => {
-                        // Found input line, extract the command
-                        if (extractCommandFromInput(screen, pin, allocator)) |cmd| {
-                            command_input = cmd;
-                            current_state = .seeking_prompt;
-                        }
-                    },
-                    else => {},
-                }
-            },
-
-            .in_command_output => {
-                switch (semantic_state) {
-                    .command => {
-                        // Still in command output, update start
-                        output_start_pin = pin;
-                        output_start_pin.?.x = 0;
-                    },
-                    .input => {
-                        // Found the command input, extract it
-                        if (extractCommandFromInput(screen, pin, allocator)) |cmd| {
-                            command_input = cmd;
-                            current_state = .seeking_prompt;
-                        }
-                    },
-                    .prompt, .prompt_continuation => {
-                        // Hit a prompt, we have a complete command/output pair
-                        try self.saveCommandEntry(
-                            context,
-                            command_input,
-                            output_start_pin,
-                            output_end_pin,
-                            surface,
-                            allocator,
-                        );
-                        commands_found += 1;
-
-                        // Reset for next command
-                        command_input = null;
-                        output_start_pin = null;
-                        output_end_pin = null;
-                        current_state = .seeking_command;
-                    },
-                    else => {},
-                }
-            },
-
-            .seeking_prompt => {
-                switch (semantic_state) {
-                    .prompt, .prompt_continuation => {
-                        // Found the prompt, save the command/output pair
-                        try self.saveCommandEntry(
-                            context,
-                            command_input,
-                            output_start_pin,
-                            output_end_pin,
-                            surface,
-                            allocator,
-                        );
-                        commands_found += 1;
-
-                        // Reset for next command
-                        command_input = null;
-                        output_start_pin = null;
-                        output_end_pin = null;
-                        current_state = .seeking_command;
-                    },
-                    else => {},
-                }
-            },
-        }
-    }
-
-    // Handle any remaining command/output pair
-    if (command_input != null or output_start_pin != null) {
-        try self.saveCommandEntry(
-            context,
-            command_input,
-            output_start_pin,
-            output_end_pin,
-            surface,
-            allocator,
-        );
-    }
-}
-
-/// Extract command text from an input line
-fn extractCommandFromInput(screen: *Screen, pin: Pin, allocator: std.mem.Allocator) ?[]u8 {
-    // Create a selection for the input line
-    if (screen.selectLine(.{
-        .pin = pin,
-        .whitespace = &.{ 0, ' ', '\t' },
-        .semantic_prompt_boundary = true,
-    })) |line_selection| {
-        // This is a simplified approach - in reality you'd need to extract just the command part
-        // For now, we'll return null to indicate we couldn't extract the command
-        // A more sophisticated implementation would parse the line to separate prompt from command
-        _ = line_selection;
-        _ = allocator;
-        return null;
-    }
-    return null;
-}
-
-/// Save a command entry to the context
-fn saveCommandEntry(
-    self: *LLMAssistantDialog,
-    context: *TerminalContext,
-    command_input: ?[]u8,
-    output_start_pin: ?Pin,
-    output_end_pin: ?Pin,
-    surface: *Surface,
-    allocator: std.mem.Allocator,
-) !void {
-    // Extract output text if we have output bounds
-    const output_text = if (output_start_pin != null and output_end_pin != null) blk: {
-        const selection = terminal.Selection.init(output_start_pin.?, output_end_pin.?, false);
-        var output_result = surface.core_surface.dumpTextLocked(allocator, selection) catch {
-            log.warn("Failed to extract command output", .{});
-            break :blk try allocator.dupe(u8, "(output extraction failed)");
-        };
-        defer output_result.deinit(allocator);
-
-        // Censor and trim the output
-        const censored = self.censorEnvironmentVariables(output_result.text) catch output_result.text;
-        const trimmed = self.trimOutput(censored);
-
-        break :blk try allocator.dupe(u8, trimmed);
-    } else try allocator.dupe(u8, "(no output)");
-
-    // Use command input if available, otherwise use placeholder
-    const command_text = if (command_input) |cmd|
-        try allocator.dupe(u8, cmd)
-    else
-        try allocator.dupe(u8, "(command extraction failed)");
-
-    const entry = TerminalContext.CommandEntry{
-        .command = command_text,
-        .output = output_text,
-    };
-    try context.commands.append(entry);
-}
-
-/// Extract current terminal input with cursor position
-fn extractCurrentInput(self: *LLMAssistantDialog, surface: *Surface, context: *TerminalContext) !void {
-    _ = self;
-    const allocator = context.allocator;
-
-    // Access terminal state with proper mutex locking (following Ghostty's thread architecture)
-    surface.core_surface.renderer_state.mutex.lock();
-    defer surface.core_surface.renderer_state.mutex.unlock();
-
-    const term = &surface.core_surface.io.terminal;
-    const screen = &term.screen;
-
-    // Check if we're at a prompt/input area using Ghostty's shell integration
-    if (!term.cursorIsAtPrompt()) {
-        // Not at a prompt, no current input to extract
-        return;
-    }
-
-    const cursor_pin = screen.cursor.page_pin.*;
-
-    // Extract only the input portion using semantic prompt boundaries
-    if (extractInputSelection(cursor_pin)) |input_selection| {
-        // Extract the text using Surface's dumpTextLocked (already under mutex)
-        var input_text = surface.core_surface.dumpTextLocked(allocator, input_selection) catch |err| {
-            log.warn("Failed to extract current input: {}", .{err});
-            return;
-        };
-        defer input_text.deinit(allocator);
-
-        // Calculate cursor position within the input (not the entire line)
-        const input_start_pin = input_selection.start();
-        const cursor_offset = calculateCursorOffsetInLine(input_start_pin, cursor_pin);
-
-        // Create input with cursor marker at the correct position
-        var input_with_cursor = std.ArrayList(u8).init(allocator);
-        defer input_with_cursor.deinit();
-
-        const text = input_text.text;
-        if (cursor_offset <= text.len) {
-            try input_with_cursor.appendSlice(text[0..cursor_offset]);
-            try input_with_cursor.appendSlice("!!CURSOR!!");
-            try input_with_cursor.appendSlice(text[cursor_offset..]);
-        } else {
-            // Cursor beyond text, append at end
-            try input_with_cursor.appendSlice(text);
-            try input_with_cursor.appendSlice("!!CURSOR!!");
-        }
-
-        context.current_input = try allocator.dupe(u8, input_with_cursor.items);
-    }
-
-    // Always capture the full line with decorations for LLM context
-    if (screen.selectLine(.{
-        .pin = cursor_pin,
-        .whitespace = null, // Don't trim anything - keep all decorations
-        .semantic_prompt_boundary = false, // Include prompt decorations
-    })) |full_line_selection| {
-        var full_line_text = surface.core_surface.dumpTextLocked(allocator, full_line_selection) catch |err| {
-            log.warn("Failed to extract full current line: {}", .{err});
-            return;
-        };
-        defer full_line_text.deinit(allocator);
-
-        const full_line_start_pin = full_line_selection.start();
-        const full_cursor_offset = calculateCursorOffsetInLine(full_line_start_pin, cursor_pin);
-
-        // Create full line with cursor marker
-        var full_line_with_cursor = std.ArrayList(u8).init(allocator);
-        defer full_line_with_cursor.deinit();
-
-        const full_text = full_line_text.text;
-        if (full_cursor_offset <= full_text.len) {
-            try full_line_with_cursor.appendSlice(full_text[0..full_cursor_offset]);
-            try full_line_with_cursor.appendSlice("!!CURSOR!!");
-            try full_line_with_cursor.appendSlice(full_text[full_cursor_offset..]);
-        } else {
-            try full_line_with_cursor.appendSlice(full_text);
-            try full_line_with_cursor.appendSlice("!!CURSOR!!");
-        }
-
-        context.current_input_full_line = try allocator.dupe(u8, full_line_with_cursor.items);
-    }
-}
-
-/// Extract selection for only the input portion using semantic prompt boundaries
-fn extractInputSelection(cursor_pin: Pin) ?terminal.Selection {
-    // Check if we're on an input line
-    const row = cursor_pin.rowAndCell().row;
-    if (row.semantic_prompt != .input) {
-        return null;
-    }
-
-    // Find the start of the input region on this line
-    var input_start_pin = cursor_pin;
-    input_start_pin.x = 0;
-
-    // Scan right to find where the actual input starts (after prompt decorations)
-    var it = input_start_pin.cellIterator(.right_down, null);
-    while (it.next()) |pin| {
-        // Stop at the same row, different rows would be continuation
-        if (pin.y != cursor_pin.y) break;
-
-        const pin_row = pin.rowAndCell().row;
-        if (pin_row.semantic_prompt == .input) {
-            input_start_pin = pin;
-            break;
-        }
-    }
-
-    // Find the end of the input region
-    var input_end_pin = cursor_pin;
-    input_end_pin.x = cursor_pin.node.data.size.cols - 1;
-
-    // Scan left from end of line to find last input character
-    it = input_end_pin.cellIterator(.left_up, null);
-    while (it.next()) |pin| {
-        // Stop at the same row
-        if (pin.y != cursor_pin.y) break;
-
-        const cell = pin.rowAndCell().cell;
-        if (cell.hasText()) {
-            input_end_pin = pin;
-            break;
-        }
-    }
-
-    return terminal.Selection.init(input_start_pin, input_end_pin, false);
-}
-
-/// Calculate the cursor offset within a line selection
-fn calculateCursorOffsetInLine(line_start_pin: Pin, cursor_pin: Pin) usize {
-    // Simple case: same row
-    if (line_start_pin.y == cursor_pin.y) {
-        return if (cursor_pin.x >= line_start_pin.x)
-            cursor_pin.x - line_start_pin.x
-        else
-            0;
-    }
-
-    // Multi-row case: would need to account for line wrapping
-    // For now, return a reasonable approximation
-    const row_diff = cursor_pin.y - line_start_pin.y;
-    const cols_per_row = cursor_pin.node.data.size.cols;
-    return row_diff * cols_per_row + cursor_pin.x - line_start_pin.x;
-}
-
-/// Censor environment variables by replacing them with ****
-fn censorEnvironmentVariables(self: *LLMAssistantDialog, text: []const u8) ![]u8 {
-    const allocator = self.arena.allocator();
-
-    // Common environment variable patterns to detect and censor
-    const env_patterns = [_][]const u8{
-        "PATH=",    "HOME=",      "USER=",      "USERNAME=", "LOGNAME=",
-        "SHELL=",   "PWD=",       "OLDPWD=",    "LANG=",     "LC_",
-        "DISPLAY=", "TERM=",      "SSH_",       "SUDO_",     "DBUS_",
-        "XDG_",     "DESKTOP_",   "SESSION_",   "WAYLAND_",  "_KEY=",
-        "_TOKEN=",  "_SECRET=",   "_PASSWORD=", "API_KEY=",  "AUTH_",
-        "PRIVATE_", "CREDENTIAL",
-    };
-
-    var result = std.ArrayList(u8).init(allocator);
-    defer result.deinit();
-
-    var i: usize = 0;
-    while (i < text.len) {
-        var found_env = false;
-
-        // Check for environment variable patterns
-        for (env_patterns) |pattern| {
-            if (i + pattern.len <= text.len and
-                std.mem.startsWith(u8, text[i..], pattern))
-            {
-                // Found an env var, censor the value part
-                try result.appendSlice(pattern);
-                i += pattern.len;
-
-                // Skip to next whitespace or newline (end of env var value)
-                while (i < text.len and
-                    !std.ascii.isWhitespace(text[i]))
-                {
-                    i += 1;
-                }
-                try result.appendSlice("****");
-                found_env = true;
-                break;
-            }
-        }
-
-        if (!found_env) {
-            try result.append(text[i]);
-            i += 1;
-        }
-    }
-
-    return allocator.dupe(u8, result.items);
 }
 
 /// Trim output to first 50 + last 50 characters with ellipsis
@@ -1202,43 +615,8 @@ fn trimOutputWithEllipsis(self: *LLMAssistantDialog, output: []const u8) []u8 {
     return trimmed;
 }
 
-fn createEnhancedPrompt(self: *LLMAssistantDialog, user_prompt: []const u8, context: TerminalContext) ![]u8 {
-    var prompt_builder = std.ArrayList(u8).init(self.arena.allocator());
-    defer prompt_builder.deinit();
-
-    // Use the new format requested by user
-    try prompt_builder.appendSlice("## The user is asking about how to perform certain steps or actions via their CLI.");
-
-    // Add command history if available
-    if (context.commands.items.len > 0) {
-        try prompt_builder.appendSlice("  Their ");
-        const num_commands = @min(context.commands.items.len, 3); // Show up to 3 commands
-        try prompt_builder.writer().print("{} latest run command{s} {s} (from oldest to newest):\n\n", .{ num_commands, if (num_commands == 1) @as([]const u8, "") else "s", if (num_commands == 1) @as([]const u8, "is") else "are" });
-
-        // Show commands in reverse order (oldest to newest as requested)
-        var i = num_commands;
-        while (i > 0) {
-            i -= 1;
-            const entry = context.commands.items[context.commands.items.len - 1 - i];
-            try prompt_builder.writer().print("{}) {s}\n", .{ num_commands - i, entry.command });
-        }
-    } else {
-        try prompt_builder.appendSlice("\n");
-    }
-
-    // Add current terminal state if available
-    if (context.current_input_full_line) |full_line| {
-        try prompt_builder.appendSlice("\n## The current state of the active line is below. Ignore any decorations that may be present. When returning the suggested CLI command, return only the part of the command that is missing and assume that it will be inserted at the end of the current line:\n\n");
-        try prompt_builder.appendSlice(full_line);
-        try prompt_builder.appendSlice("\n");
-    }
-
-    // Add the user's request
-    try prompt_builder.appendSlice("\n## They wish to:\n\n");
-    try prompt_builder.appendSlice(user_prompt);
-    try prompt_builder.appendSlice("\n");
-
-    return self.arena.allocator().dupe(u8, prompt_builder.items);
+fn createEnhancedPrompt(self: *LLMAssistantDialog, user_prompt: []const u8, context: LLMTerminalContext) ![]u8 {
+    return llm_prompt_builder.createEnhancedPrompt(self.arena.allocator(), user_prompt, context);
 }
 
 fn trimOutput(self: *LLMAssistantDialog, output: []const u8) []const u8 {

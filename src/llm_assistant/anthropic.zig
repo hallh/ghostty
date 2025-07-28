@@ -1,6 +1,7 @@
 const std = @import("std");
 const config = @import("../config.zig");
 const llm = @import("../llm_assistant.zig");
+const provider_base = @import("provider_base.zig");
 const test_utils = @import("test_utils.zig");
 
 const log = std.log.scoped(.anthropic_provider);
@@ -9,30 +10,15 @@ const log = std.log.scoped(.anthropic_provider);
 pub const AnthropicProvider = struct {
     const Self = @This();
 
-    http_client: llm.HTTPClient,
-    api_key: []const u8,
-    model: []const u8,
-    temperature: f32,
-    max_tokens: u32,
-    system_prompt: []const u8,
+    base: provider_base.BaseProvider,
 
     /// Default Anthropic API endpoint
     const API_BASE_URL = "https://api.anthropic.com/v1";
-    const DEFAULT_MODEL = "claude-3-5-sonnet-20241022";
-    const DEFAULT_TEMPERATURE: f32 = 0.1;
-    const DEFAULT_MAX_TOKENS: u32 = 1024;
-    const DEFAULT_SYSTEM_PROMPT =
-        \\You are a helpful Linux command assistant. Respond with ONLY the command that would accomplish the user's request. 
-        \\Do not include explanations, markdown formatting, or additional text. 
-        \\Return only the raw command that can be executed directly in a Linux terminal.
-        \\
-        \\Examples:
-        \\User: "list all files including hidden ones"
-        \\Assistant: ls -la
-        \\
-        \\User: "find all PDF files in the current directory"
-        \\Assistant: find . -name "*.pdf" -type f
-    ;
+
+    /// Provider-specific defaults
+    const DEFAULTS = provider_base.Defaults{
+        .model = "claude-3-5-sonnet-20241022",
+    };
 
     /// Anthropic request structure
     const AnthropicRequest = struct {
@@ -41,7 +27,6 @@ pub const AnthropicProvider = struct {
         temperature: f32,
         system: []const u8,
         messages: []const Message,
-        stream: bool = false,
 
         const Message = struct {
             role: []const u8,
@@ -80,7 +65,6 @@ pub const AnthropicProvider = struct {
     /// Provider vtable implementation
     pub const vtable = llm.LLMProvider.Vtable{
         .request = request,
-        .requestStream = requestStream,
         .deinit = deinitProvider,
     };
 
@@ -93,29 +77,8 @@ pub const AnthropicProvider = struct {
         const provider = try allocator.create(AnthropicProvider);
         errdefer allocator.destroy(provider);
 
-        // Copy configuration values
-        const owned_api_key = try allocator.dupe(u8, api_key);
-        errdefer allocator.free(owned_api_key);
-
-        const model = if (cfg.@"ext-llm-model") |m|
-            try allocator.dupe(u8, m)
-        else
-            try allocator.dupe(u8, DEFAULT_MODEL);
-        errdefer allocator.free(model);
-
-        const system_prompt = if (cfg.@"ext-llm-system-prompt") |sp|
-            try allocator.dupe(u8, sp)
-        else
-            try allocator.dupe(u8, DEFAULT_SYSTEM_PROMPT);
-        errdefer allocator.free(system_prompt);
-
         provider.* = AnthropicProvider{
-            .http_client = llm.HTTPClient.init(allocator),
-            .api_key = owned_api_key,
-            .model = model,
-            .temperature = cfg.@"ext-llm-temperature",
-            .max_tokens = cfg.@"ext-llm-max-tokens",
-            .system_prompt = system_prompt,
+            .base = try provider_base.BaseProvider.init(allocator, api_key, cfg, DEFAULTS),
         };
 
         return provider;
@@ -129,10 +92,7 @@ pub const AnthropicProvider = struct {
 
     /// Clean up provider resources
     pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
-        self.http_client.deinit();
-        allocator.free(self.api_key);
-        allocator.free(self.model);
-        allocator.free(self.system_prompt);
+        self.base.deinit(allocator);
         allocator.destroy(self);
     }
 
@@ -144,17 +104,11 @@ pub const AnthropicProvider = struct {
     ) llm.LLMError!llm.LLMResponse {
         const self: *AnthropicProvider = @ptrCast(@alignCast(ptr));
 
-        std.log.info("[ANTHROPIC_DEBUG] Starting request with prompt length: {}", .{req.prompt.len});
-        std.log.info("[ANTHROPIC_DEBUG] Request has terminal_context: {}", .{req.terminal_context != null});
-
-        const request_json = try self.buildRequestJSON(allocator, req, false);
+        const request_json = try self.buildRequestJSON(allocator, req);
         defer allocator.free(request_json);
 
-        std.log.info("[ANTHROPIC_DEBUG] Generated JSON length: {}", .{request_json.len});
-        std.log.info("[ANTHROPIC_DEBUG] JSON preview: {s}", .{request_json[0..@min(500, request_json.len)]});
-
         const headers = [_]std.http.Header{
-            .{ .name = "x-api-key", .value = self.api_key },
+            .{ .name = "x-api-key", .value = self.base.api_key },
             .{ .name = "anthropic-version", .value = "2023-06-01" },
         };
 
@@ -163,27 +117,9 @@ pub const AnthropicProvider = struct {
 
         const url = API_BASE_URL ++ "/messages";
 
-        std.log.info("[ANTHROPIC_DEBUG] Making HTTP request to: {s}", .{url});
-
-        const status = try self.http_client.postJSON(url, &headers, request_json, &response_buffer);
-
-        std.log.info("[ANTHROPIC_DEBUG] HTTP response status: {}", .{status});
-        std.log.info("[ANTHROPIC_DEBUG] Response length: {}", .{response_buffer.items.len});
+        const status = try self.base.http_client.postJSON(url, &headers, request_json, &response_buffer);
 
         return self.parseResponse(allocator, response_buffer.items, status);
-    }
-
-    /// Make a streaming request (now just returns error)
-    fn requestStream(
-        _: *anyopaque,
-        _: std.mem.Allocator,
-        _: llm.LLMRequest,
-        _: llm.StreamCallback,
-        _: ?*anyopaque,
-    ) llm.LLMError!void {
-        // For simplicity, streaming now just returns an error
-        // The UI should use the blocking request method instead
-        return llm.LLMError.UnsupportedProvider;
     }
 
     /// Build JSON request payload
@@ -191,85 +127,28 @@ pub const AnthropicProvider = struct {
         self: *Self,
         allocator: std.mem.Allocator,
         req: llm.LLMRequest,
-        stream: bool,
     ) llm.LLMError![]u8 {
-        std.log.info("[ANTHROPIC_DEBUG] buildRequestJSON called", .{});
-        std.log.info("[ANTHROPIC_DEBUG] Input request has terminal_context: {}", .{req.terminal_context != null});
-
-        // Always use the prompt directly - it may already be enhanced with terminal context
-        std.log.info("[ANTHROPIC_DEBUG] Using prompt as-is (may contain enhanced context)", .{});
-
         const messages = [_]AnthropicRequest.Message{
             .{ .role = "user", .content = req.prompt },
         };
 
         const api_request = AnthropicRequest{
-            .model = req.model orelse self.model,
-            .max_tokens = req.max_tokens orelse self.max_tokens,
-            .temperature = req.temperature orelse self.temperature,
-            .system = req.system_prompt orelse self.system_prompt,
+            .model = req.model orelse self.base.model,
+            .max_tokens = req.max_tokens orelse self.base.max_tokens,
+            .temperature = req.temperature orelse self.base.temperature,
+            .system = req.system_prompt orelse self.base.system_prompt,
             .messages = &messages,
-            .stream = stream,
         };
 
-        std.log.info("[ANTHROPIC_DEBUG] About to stringify JSON for standard request", .{});
-        const json_result = std.json.stringifyAlloc(allocator, api_request, .{}) catch |err| {
-            std.log.err("[ANTHROPIC_DEBUG] JSON stringification failed: {}", .{err});
-            return err;
+        return std.json.stringifyAlloc(allocator, api_request, .{}) catch |err| {
+            log.err("Failed to serialize Anthropic request: {}", .{err});
+            return llm.LLMError.JSONParseError;
         };
-
-        std.log.info("[ANTHROPIC_DEBUG] Standard JSON stringification successful, length: {}", .{json_result.len});
-        return json_result;
-    }
-
-    /// Build JSON for requests with terminal context
-    fn buildPromptWithContext(
-        self: *Self,
-        allocator: std.mem.Allocator,
-        req: llm.LLMRequest,
-        context: llm.TerminalContext,
-        stream: bool,
-    ) llm.LLMError![]u8 {
-        std.log.info("[ANTHROPIC_DEBUG] buildPromptWithContext called", .{});
-        std.log.info("[ANTHROPIC_DEBUG] Terminal context - command_history: '{any}'", .{context.command_history});
-        std.log.info("[ANTHROPIC_DEBUG] Terminal context - current_input: '{any}'", .{context.current_input});
-
-        // Build enhanced prompt with context
-        const enhanced_prompt = std.fmt.allocPrint(allocator, "Recent command history:\n{s}\n\nCurrent terminal input:\n{s}\n\nUser request: {s}", .{ context.command_history orelse "", context.current_input orelse "", req.prompt }) catch {
-            std.log.err("[ANTHROPIC_DEBUG] Failed to build enhanced prompt", .{});
-            return llm.LLMError.OutOfMemory;
-        };
-        defer allocator.free(enhanced_prompt);
-
-        std.log.info("[ANTHROPIC_DEBUG] Built enhanced prompt, length: {}", .{enhanced_prompt.len});
-        std.log.info("[ANTHROPIC_DEBUG] Enhanced prompt preview: {s}", .{enhanced_prompt[0..@min(200, enhanced_prompt.len)]});
-
-        const messages = [_]AnthropicRequest.Message{
-            .{ .role = "user", .content = enhanced_prompt },
-        };
-
-        const api_request = AnthropicRequest{
-            .model = req.model orelse self.model,
-            .max_tokens = req.max_tokens orelse self.max_tokens,
-            .temperature = req.temperature orelse self.temperature,
-            .system = req.system_prompt orelse self.system_prompt,
-            .messages = &messages,
-            .stream = stream,
-        };
-
-        std.log.info("[ANTHROPIC_DEBUG] About to stringify JSON for context request", .{});
-        const json_result = std.json.stringifyAlloc(allocator, api_request, .{}) catch |err| {
-            std.log.err("[ANTHROPIC_DEBUG] Context JSON stringification failed: {}", .{err});
-            return err;
-        };
-
-        std.log.info("[ANTHROPIC_DEBUG] Context JSON stringification successful, length: {}", .{json_result.len});
-        return json_result;
     }
 
     /// Parse API response into LLMResponse
     pub fn parseResponse(
-        self: *Self,
+        _: *Self,
         allocator: std.mem.Allocator,
         response_json: []const u8,
         status: std.http.Status,
@@ -323,42 +202,13 @@ pub const AnthropicProvider = struct {
             };
         }
 
-        // Clean up the command text (remove any markdown formatting, etc.)
-        const cleaned_command = try self.cleanCommandText(allocator, command_text.items);
+        // Clean up the command text using base provider method
+        const cleaned_command = try provider_base.BaseProvider.cleanCommandText(allocator, command_text.items);
 
         return llm.LLMResponse{
             .command = cleaned_command,
             .is_final = true,
         };
-    }
-
-    /// Clean up command text to ensure it's a valid shell command
-    fn cleanCommandText(self: *Self, allocator: std.mem.Allocator, text: []const u8) llm.LLMError![]u8 {
-        _ = self;
-
-        // Trim whitespace
-        const trimmed = std.mem.trim(u8, text, " \t\n\r");
-
-        // Remove markdown code blocks if present
-        var cleaned = trimmed;
-        if (std.mem.startsWith(u8, cleaned, "```")) {
-            if (std.mem.indexOf(u8, cleaned[3..], "\n")) |newline_pos| {
-                cleaned = cleaned[3 + newline_pos + 1 ..];
-            }
-        }
-        if (std.mem.endsWith(u8, cleaned, "```")) {
-            cleaned = cleaned[0 .. cleaned.len - 3];
-        }
-
-        // Remove backticks if present
-        if (std.mem.startsWith(u8, cleaned, "`") and std.mem.endsWith(u8, cleaned, "`")) {
-            cleaned = cleaned[1 .. cleaned.len - 1];
-        }
-
-        // Final trim
-        cleaned = std.mem.trim(u8, cleaned, " \t\n\r");
-
-        return try allocator.dupe(u8, cleaned);
     }
 };
 
@@ -543,7 +393,7 @@ const TestAnthropicProvider = struct {
     }
 
     // Use AnthropicProvider methods for parsing
-    fn buildRequestJSON(self: *TestAnthropicProvider, allocator: std.mem.Allocator, req: llm.LLMRequest, stream: bool) ![]u8 {
+    fn buildRequestJSON(self: *TestAnthropicProvider, allocator: std.mem.Allocator, req: llm.LLMRequest, _: bool) ![]u8 {
         const messages = [_]AnthropicProvider.AnthropicRequest.Message{
             .{ .role = "user", .content = req.prompt },
         };
@@ -554,7 +404,6 @@ const TestAnthropicProvider = struct {
             .temperature = req.temperature orelse self.temperature,
             .system = req.system_prompt orelse self.system_prompt,
             .messages = &messages,
-            .stream = stream,
         };
 
         return std.json.stringifyAlloc(allocator, api_request, .{}) catch return llm.LLMError.JSONParseError;

@@ -232,22 +232,10 @@ const MockLLMProvider = struct {
         return llm.LLMProvider{
             .ptr = self,
             .vtable = &.{
-                .requestStream = requestStream,
                 .request = request,
                 .deinit = deinit,
             },
         };
-    }
-
-    fn requestStream(
-        _: *anyopaque,
-        _: std.mem.Allocator,
-        _: llm.LLMRequest,
-        _: llm.StreamCallback,
-        _: ?*anyopaque,
-    ) llm.LLMError!void {
-        // Streaming is no longer supported, return error
-        return llm.LLMError.UnsupportedProvider;
     }
 
     fn request(ptr: *anyopaque, allocator: std.mem.Allocator, _: llm.LLMRequest) llm.LLMError!llm.LLMResponse {
@@ -1024,29 +1012,6 @@ test "comprehensive workflow simulation" {
     try testing.expectEqualStrings("ls -la", dialog.suggestion_text);
 }
 
-test "streaming disabled verification" {
-    var dialog = DialogState.init(testing.allocator);
-    defer dialog.deinit();
-
-    var mock_provider = MockLLMProvider{
-        .response_command = "echo test",
-        .delay_ms = 0,
-    };
-
-    // Test that requestStream returns UnsupportedProvider
-    const provider = mock_provider.provider();
-    const request = llm.LLMRequest{ .prompt = "test" };
-
-    const result = provider.requestStream(
-        testing.allocator,
-        request,
-        undefined, // callback not used
-        null, // user_data not used
-    );
-
-    try testing.expectError(llm.LLMError.UnsupportedProvider, result);
-}
-
 test "blocking request functionality" {
     var dialog = DialogState.init(testing.allocator);
     defer dialog.deinit();
@@ -1436,7 +1401,6 @@ test "Terminal context builds the correct prompt" {
     // 2. Define terminal context
     const context = llm.TerminalContext{
         .command_history = "ls -l\ngit status",
-        .current_input = "cat ",
     };
 
     // 3. Create a request with context
@@ -1446,7 +1410,7 @@ test "Terminal context builds the correct prompt" {
     };
 
     // 4. Simulate the prompt building
-    const expected_prompt = "Recent command history:\nls -l\ngit status\n\nCurrent terminal input:\ncat \n\nUser request: list all files";
+    const expected_prompt = "Recent command history:\nls -l\ngit status\n\nUser request: list all files";
 
     // 5. In a real scenario, this would be passed to the LLM provider
     // For this test, we just verify that the prompt would be built correctly
@@ -1457,9 +1421,6 @@ test "Terminal context builds the correct prompt" {
 
     if (request.terminal_context.?.command_history) |history| {
         try writer.print("Recent command history:\n{s}\n\n", .{history});
-    }
-    if (request.terminal_context.?.current_input) |input| {
-        try writer.print("Current terminal input:\n{s}\n\n", .{input});
     }
     try writer.print("User request: {s}", .{request.prompt});
 
@@ -1488,7 +1449,7 @@ test "Provider JSON generation without terminal context works correctly" {
     };
 
     // Generate the JSON payload
-    const json_payload = try provider.buildRequestJSON(allocator, request, false);
+    const json_payload = try provider.buildRequestJSON(allocator, request);
     defer allocator.free(json_payload);
 
     // Parse the JSON to verify it's valid
@@ -1523,7 +1484,7 @@ test "OpenAI provider JSON generation works correctly" {
         .system_prompt = "You are a helpful assistant.",
     };
 
-    const json_payload = try provider.buildRequestJSON(allocator, request, false);
+    const json_payload = try provider.buildRequestJSON(allocator, request);
     defer allocator.free(json_payload);
 
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_payload, .{}) catch |err| {
@@ -1663,7 +1624,7 @@ test "Regression: JSON serialization with valid vs corrupted prompts" {
         .system_prompt = "You are a helpful assistant",
     };
 
-    const valid_json = try provider.buildRequestJSON(allocator, valid_request, false);
+    const valid_json = try provider.buildRequestJSON(allocator, valid_request);
     defer allocator.free(valid_json);
 
     // Parse the JSON to verify structure
@@ -1750,7 +1711,7 @@ test "Regression: Use-after-free scenario with enhanced prompt cleanup" {
     defer provider.deinit(allocator);
 
     // This should work without corruption
-    const json = try provider.buildRequestJSON(allocator, context.request, false);
+    const json = try provider.buildRequestJSON(allocator, context.request);
     defer allocator.free(json);
 
     // Verify the JSON contains the original prompt, not corrupted data
@@ -1786,7 +1747,7 @@ test "End-to-end: All providers handle requests without errors" {
         const provider = try anthropic.AnthropicProvider.init(allocator, "test-key", &cfg);
         defer provider.deinit(allocator);
 
-        const json_payload = try provider.buildRequestJSON(allocator, request, false);
+        const json_payload = try provider.buildRequestJSON(allocator, request);
         defer allocator.free(json_payload);
 
         // Verify JSON is valid and contains expected structure
@@ -1813,7 +1774,7 @@ test "End-to-end: All providers handle requests without errors" {
         const provider = try openai.OpenAIProvider.init(allocator, "test-key", &cfg);
         defer provider.deinit(allocator);
 
-        const json_payload = try provider.buildRequestJSON(allocator, request, false);
+        const json_payload = try provider.buildRequestJSON(allocator, request);
         defer allocator.free(json_payload);
 
         // Verify JSON is valid and contains expected structure
@@ -1886,7 +1847,7 @@ test "End-to-end: All providers handle requests without terminal context (backwa
         const provider = try anthropic.AnthropicProvider.init(allocator, "test-key", &cfg);
         defer provider.deinit(allocator);
 
-        const json_payload = try provider.buildRequestJSON(allocator, request, false);
+        const json_payload = try provider.buildRequestJSON(allocator, request);
         defer allocator.free(json_payload);
 
         // Should not crash and should produce valid JSON
@@ -1912,7 +1873,7 @@ test "End-to-end: All providers handle requests without terminal context (backwa
         const provider = try openai.OpenAIProvider.init(allocator, "test-key", &cfg);
         defer provider.deinit(allocator);
 
-        const json_payload = try provider.buildRequestJSON(allocator, request, false);
+        const json_payload = try provider.buildRequestJSON(allocator, request);
         defer allocator.free(json_payload);
 
         const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_payload, .{}) catch |err| {
@@ -1970,7 +1931,6 @@ test "End-to-end: All providers handle edge cases correctly" {
             .name = "empty command history",
             .context = llm.TerminalContext{
                 .command_history = "",
-                .current_input = "ls",
             },
             .prompt = "help with ls command",
         },
@@ -1978,7 +1938,6 @@ test "End-to-end: All providers handle edge cases correctly" {
             .name = "empty current input",
             .context = llm.TerminalContext{
                 .command_history = "cd /home",
-                .current_input = "",
             },
             .prompt = "suggest next command",
         },
@@ -1986,7 +1945,6 @@ test "End-to-end: All providers handle edge cases correctly" {
             .name = "long command history",
             .context = llm.TerminalContext{
                 .command_history = "git init\ngit add .\ngit commit -m 'initial'\ngit remote add origin\ngit push\nls -la\ncd src\nfind . -name '*.zig'\ngrep -r 'test'\nvim main.zig",
-                .current_input = "git log --oneline | head -",
             },
             .prompt = "complete this git command",
         },
@@ -1994,7 +1952,6 @@ test "End-to-end: All providers handle edge cases correctly" {
             .name = "special characters in commands",
             .context = llm.TerminalContext{
                 .command_history = "echo \"Hello World!\"\ngrep -E '[0-9]+' file.txt\nfind . -name '*.json' | xargs cat",
-                .current_input = "sed 's/old/new/g'",
             },
             .prompt = "help with sed command",
         },
@@ -2013,7 +1970,7 @@ test "End-to-end: All providers handle edge cases correctly" {
             const provider = try anthropic.AnthropicProvider.init(allocator, "test-key", &cfg);
             defer provider.deinit(allocator);
 
-            const json_payload = try provider.buildRequestJSON(allocator, request, false);
+            const json_payload = try provider.buildRequestJSON(allocator, request);
             defer allocator.free(json_payload);
 
             // Should not crash and should produce valid JSON
@@ -2029,7 +1986,7 @@ test "End-to-end: All providers handle edge cases correctly" {
             const provider = try openai.OpenAIProvider.init(allocator, "test-key", &cfg);
             defer provider.deinit(allocator);
 
-            const json_payload = try provider.buildRequestJSON(allocator, request, false);
+            const json_payload = try provider.buildRequestJSON(allocator, request);
             defer allocator.free(json_payload);
 
             const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_payload, .{}) catch |err| {
@@ -2262,29 +2219,29 @@ test "Terminal context: Enhanced prompt template integration" {
     // Simulate the enhanced prompt creation with terminal context
     const user_prompt = "get the top 3 files by coverage excluding files with 100% coverage";
     const command_history = "## 2\nCommand: `cat kcov-output/ghostty-test/coverage.json`\nOutput:\n```\nCoverage data...\n```\n\n## 1\nCommand: `zig build test -Dtest-coverage`\nOutput:\n```\nTest results...\n```\n\n";
-    const current_input = "cat kcov-output/ghostty-test/coverage.json | jq -r !!CURSOR!! | tee /tmp/out.csv";
+    const current_input_full_line = "02:09:51  ghostty  cat kcov-output/ghostty-test/coverage.json | jq -r !!CURSOR!! | tee /tmp/out.csv";
 
     var prompt_builder = std.ArrayList(u8).init(allocator);
     defer prompt_builder.deinit();
 
-    // Build enhanced prompt using the specified template
-    try prompt_builder.appendSlice(user_prompt);
-    try prompt_builder.appendSlice("\n\n---\nAdditional context is provided below.\n\n");
-    try prompt_builder.appendSlice("Last 2 run commands:\n\n");
+    // Build enhanced prompt using the new template that matches prompt_builder.zig
+    try prompt_builder.appendSlice("## The user is asking about how to perform certain steps or actions via their CLI.  Their 2 latest run commands are (from oldest to newest):\n\n");
     try prompt_builder.appendSlice(command_history);
-    try prompt_builder.appendSlice("The current state of the cli, the user's cursor placement is marked by `!!CURSOR!!` - this is not actually included in the user's terminal, but is for your information only.\n```\n");
-    try prompt_builder.appendSlice(current_input);
-    try prompt_builder.appendSlice("\n```\n---\n");
+    try prompt_builder.appendSlice("\n## The current state of the active line is below. Ignore any decorations that may be present. When returning the suggested CLI command, return only the part of the command that is missing and assume that it will be inserted at the end of the current line:\n\n");
+    try prompt_builder.appendSlice(current_input_full_line);
+    try prompt_builder.appendSlice("\n\n## They wish to:\n\n");
+    try prompt_builder.appendSlice(user_prompt);
+    try prompt_builder.appendSlice("\n");
 
     const enhanced_prompt = prompt_builder.items;
 
     // Verify the enhanced prompt contains all expected sections
     try std.testing.expect(std.mem.indexOf(u8, enhanced_prompt, user_prompt) != null);
-    try std.testing.expect(std.mem.indexOf(u8, enhanced_prompt, "Additional context is provided below") != null);
-    try std.testing.expect(std.mem.indexOf(u8, enhanced_prompt, "Last 2 run commands") != null);
+    try std.testing.expect(std.mem.indexOf(u8, enhanced_prompt, "The user is asking about how to perform") != null);
+    try std.testing.expect(std.mem.indexOf(u8, enhanced_prompt, "2 latest run commands") != null);
     try std.testing.expect(std.mem.indexOf(u8, enhanced_prompt, "Command: `cat kcov-output/ghostty-test/coverage.json`") != null);
     try std.testing.expect(std.mem.indexOf(u8, enhanced_prompt, "!!CURSOR!!") != null);
-    try std.testing.expect(std.mem.indexOf(u8, enhanced_prompt, "current state of the cli") != null);
+    try std.testing.expect(std.mem.indexOf(u8, enhanced_prompt, "current state of the active line") != null);
 }
 
 test "End-to-end: Command suggestion with command history" {
@@ -2360,7 +2317,6 @@ test "Terminal context: Memory management and cleanup" {
     // Test proper memory management for terminal context structures
     const TerminalContext = struct {
         commands: std.ArrayList(CommandEntry),
-        current_input: ?[]u8 = null,
         allocator: std.mem.Allocator,
 
         const CommandEntry = struct {
@@ -2374,9 +2330,6 @@ test "Terminal context: Memory management and cleanup" {
                 self.allocator.free(entry.output);
             }
             self.commands.deinit();
-            if (self.current_input) |input| {
-                self.allocator.free(input);
-            }
         }
     };
 
@@ -2391,14 +2344,10 @@ test "Terminal context: Memory management and cleanup" {
         .output = try allocator.dupe(u8, "test output"),
     });
 
-    context.current_input = try allocator.dupe(u8, "current input with !!CURSOR!!");
-
     // Verify context was created correctly
     try std.testing.expect(context.commands.items.len == 1);
     try std.testing.expectEqualStrings("test command", context.commands.items[0].command);
     try std.testing.expectEqualStrings("test output", context.commands.items[0].output);
-    try std.testing.expect(context.current_input != null);
-    try std.testing.expectEqualStrings("current input with !!CURSOR!!", context.current_input.?);
 
     // Clean up and verify no leaks
     context.deinit();
