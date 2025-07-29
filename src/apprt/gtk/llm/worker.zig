@@ -194,3 +194,173 @@ fn handleWorkerCallback(data: ?*anyopaque) callconv(.c) c_int {
     callback_data.callback(callback_data.response, callback_data.user_data);
     return 0; // FALSE - remove from idle
 }
+
+test "WorkerRequest.init and deinit" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const prompt_text = "test prompt";
+    const prompt_copy = try allocator.dupe(u8, prompt_text);
+
+    var request = WorkerRequest{
+        .prompt = prompt_copy,
+        .terminal_context = null,
+        .allocator = allocator,
+    };
+
+    try testing.expectEqualStrings(prompt_text, request.prompt);
+    try testing.expect(request.terminal_context == null);
+
+    request.deinit();
+}
+
+test "WorkerRequest.deinit with terminal context" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const prompt_copy = try allocator.dupe(u8, "test prompt");
+
+    const context = terminal_context.TerminalContext{
+        .current_input_full_line = try allocator.dupe(u8, "test context"),
+        .allocator = allocator,
+    };
+
+    var request = WorkerRequest{
+        .prompt = prompt_copy,
+        .terminal_context = context,
+        .allocator = allocator,
+    };
+
+    try testing.expect(request.terminal_context != null);
+
+    // Should not leak memory
+    request.deinit();
+}
+
+test "WorkerResponse.init and deinit success case" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var response = WorkerResponse{
+        .success = true,
+        .response = try allocator.dupe(u8, "successful response"),
+        .error_message = null,
+        .allocator = allocator,
+    };
+
+    try testing.expect(response.success == true);
+    try testing.expect(response.response != null);
+    try testing.expect(response.error_message == null);
+    try testing.expectEqualStrings("successful response", response.response.?);
+
+    response.deinit();
+}
+
+test "WorkerResponse.init and deinit error case" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var response = WorkerResponse{
+        .success = false,
+        .response = null,
+        .error_message = try allocator.dupe(u8, "error occurred"),
+        .allocator = allocator,
+    };
+
+    try testing.expect(response.success == false);
+    try testing.expect(response.response == null);
+    try testing.expect(response.error_message != null);
+    try testing.expectEqualStrings("error occurred", response.error_message.?);
+
+    response.deinit();
+}
+
+test "WorkerResponse.deinit with both response and error" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var response = WorkerResponse{
+        .success = false,
+        .response = try allocator.dupe(u8, "response text"),
+        .error_message = try allocator.dupe(u8, "error text"),
+        .allocator = allocator,
+    };
+
+    // Should handle freeing both fields
+    response.deinit();
+}
+
+test "WorkerCallback type definition" {
+    const testing = std.testing;
+    // Test that the callback type can be used correctly
+    const TestCallback = WorkerCallback;
+
+    // Define a test callback function
+    const testCallback: TestCallback = struct {
+        fn callback(response: WorkerResponse, user_data: ?*anyopaque) void {
+            _ = response;
+            _ = user_data;
+            // Test callback that does nothing
+        }
+    }.callback;
+
+    // Verify the callback type is correct
+    try testing.expect(@TypeOf(testCallback) == TestCallback);
+}
+
+test "WorkerRequest memory management" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Test creating and destroying multiple requests
+    for (0..10) |i| {
+        var prompt_buf: [100]u8 = undefined;
+        const prompt_text = try std.fmt.bufPrint(prompt_buf[0..], "test prompt {}", .{i});
+
+        var request = WorkerRequest{
+            .prompt = try allocator.dupe(u8, prompt_text),
+            .terminal_context = null,
+            .allocator = allocator,
+        };
+
+        try testing.expect(request.prompt.len > 0);
+
+        request.deinit();
+    }
+}
+
+test "WorkerResponse memory management" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Test creating and destroying multiple responses
+    for (0..10) |i| {
+        var response_buf: [100]u8 = undefined;
+        const response_text = try std.fmt.bufPrint(response_buf[0..], "response {}", .{i});
+
+        var response = WorkerResponse{
+            .success = true,
+            .response = try allocator.dupe(u8, response_text),
+            .error_message = null,
+            .allocator = allocator,
+        };
+
+        try testing.expect(response.response.?.len > 0);
+
+        response.deinit();
+    }
+}
