@@ -77,8 +77,11 @@ pub const AnthropicProvider = struct {
         const provider = try allocator.create(AnthropicProvider);
         errdefer allocator.destroy(provider);
 
+        // Get provider-specific model or use default
+        const model = cfg.@"ext-llm-anthropic-model" orelse DEFAULTS.model;
+
         provider.* = AnthropicProvider{
-            .base = try provider_base.BaseProvider.init(allocator, api_key, cfg, DEFAULTS),
+            .base = try provider_base.BaseProvider.init(allocator, api_key, model, cfg, DEFAULTS),
         };
 
         return provider;

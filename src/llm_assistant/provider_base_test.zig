@@ -168,7 +168,6 @@ test "BaseProvider.init success case" {
 
     // Create a minimal config for testing
     var cfg = config.Config{};
-    cfg.@"ext-llm-model" = "test-model";
     cfg.@"ext-llm-temperature" = 0.5;
     cfg.@"ext-llm-max-tokens" = 2048;
     cfg.@"ext-llm-system-prompt" = "test system prompt";
@@ -177,7 +176,7 @@ test "BaseProvider.init success case" {
         .model = "default-model",
     };
 
-    var base = try provider_base.BaseProvider.init(allocator, "test-api-key", &cfg, defaults);
+    var base = try provider_base.BaseProvider.init(allocator, "test-api-key", "test-model", &cfg, defaults);
     defer base.deinit(allocator);
 
     // Verify strings were copied properly
@@ -195,7 +194,6 @@ test "BaseProvider.init with defaults" {
 
     // Create a minimal config with nulls to test defaults
     var cfg = config.Config{};
-    cfg.@"ext-llm-model" = null;
     cfg.@"ext-llm-temperature" = 0.7;
     cfg.@"ext-llm-max-tokens" = 1024;
     cfg.@"ext-llm-system-prompt" = null;
@@ -207,12 +205,12 @@ test "BaseProvider.init with defaults" {
         .system_prompt = "default system prompt",
     };
 
-    var base = try provider_base.BaseProvider.init(allocator, "test-api-key", &cfg, defaults);
+    var base = try provider_base.BaseProvider.init(allocator, "test-api-key", "provided-model", &cfg, defaults);
     defer base.deinit(allocator);
 
     // Verify defaults were used
     try testing.expectEqualStrings("test-api-key", base.api_key);
-    try testing.expectEqualStrings("default-model", base.model);
+    try testing.expectEqualStrings("provided-model", base.model);
     try testing.expectEqualStrings("default system prompt", base.system_prompt);
     try testing.expect(base.temperature == 0.7); // From config
     try testing.expect(base.max_tokens == 1024); // From config
@@ -260,7 +258,6 @@ const FailingAllocator = struct {
 
 test "BaseProvider.init handles allocation failures properly" {
     var cfg = config.Config{};
-    cfg.@"ext-llm-model" = "test-model";
     cfg.@"ext-llm-temperature" = 0.5;
     cfg.@"ext-llm-max-tokens" = 2048;
     cfg.@"ext-llm-system-prompt" = "test system prompt";
@@ -277,7 +274,7 @@ test "BaseProvider.init handles allocation failures properly" {
         };
         const allocator = failing_allocator.allocator();
 
-        const result = provider_base.BaseProvider.init(allocator, "test-api-key", &cfg, defaults);
+        const result = provider_base.BaseProvider.init(allocator, "test-api-key", "test-model", &cfg, defaults);
         try testing.expectError(error.OutOfMemory, result);
     }
 
@@ -289,7 +286,7 @@ test "BaseProvider.init handles allocation failures properly" {
         };
         const allocator = failing_allocator.allocator();
 
-        const result = provider_base.BaseProvider.init(allocator, "test-api-key", &cfg, defaults);
+        const result = provider_base.BaseProvider.init(allocator, "test-api-key", "test-model", &cfg, defaults);
         try testing.expectError(error.OutOfMemory, result);
     }
 
@@ -301,7 +298,7 @@ test "BaseProvider.init handles allocation failures properly" {
         };
         const allocator = failing_allocator.allocator();
 
-        const result = provider_base.BaseProvider.init(allocator, "test-api-key", &cfg, defaults);
+        const result = provider_base.BaseProvider.init(allocator, "test-api-key", "test-model", &cfg, defaults);
         try testing.expectError(error.OutOfMemory, result);
     }
 }

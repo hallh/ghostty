@@ -39,6 +39,7 @@ pub const BaseProvider = struct {
     pub fn init(
         allocator: std.mem.Allocator,
         api_key: []const u8,
+        model: []const u8,
         cfg: *const config.Config,
         defaults: Defaults,
     ) !Self {
@@ -46,7 +47,7 @@ pub const BaseProvider = struct {
         const owned_api_key = try allocator.dupe(u8, api_key);
         errdefer allocator.free(owned_api_key);
 
-        const owned_model = try allocator.dupe(u8, cfg.@"ext-llm-model" orelse defaults.model);
+        const owned_model = try allocator.dupe(u8, model);
         errdefer allocator.free(owned_model);
 
         const owned_system_prompt = try allocator.dupe(u8, cfg.@"ext-llm-system-prompt" orelse defaults.system_prompt);

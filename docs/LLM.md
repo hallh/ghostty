@@ -41,10 +41,10 @@ Add the following settings to your Ghostty configuration file:
 ### Required Configuration
 
 ```ini
-# Set provider-specific API keys (REQUIRED)
-ext-llm-anthropic-api-key = sk-ant-your_anthropic_key_here
-ext-llm-openai-api-key = sk-your_openai_key_here  
-ext-llm-gemini-api-key = your_gemini_key_here
+# Provider-specific API keys (REQUIRED)
+ext-llm-anthropic-api-key = "..."  # for Anthropic Claude
+ext-llm-openai-api-key = "..."         # for OpenAI GPT
+ext-llm-gemini-api-key = "..."            # for Google Gemini
 
 # Choose your provider (optional - defaults to anthropic)
 ext-llm-provider = anthropic  # or openai, gemini
@@ -53,10 +53,10 @@ ext-llm-provider = anthropic  # or openai, gemini
 ### Optional Configuration
 
 ```ini
-# Model to use (optional - uses provider defaults)
-ext-llm-model = claude-3-7-sonnet-latest  # for Anthropic
-# ext-llm-model = gpt-4.1                 # for OpenAI
-# ext-llm-model = gemini-2.5-flash        # for Google
+# Provider-specific models (optional - uses provider defaults)
+ext-llm-anthropic-model = "claude-3-7-sonnet-latest"  # for Anthropic
+ext-llm-openai-model = "gpt-4.1"                     # for OpenAI
+ext-llm-gemini-model = "gemini-2.5-flash"            # for Gemini
 
 # Temperature for response generation (default: 1.0)
 ext-llm-temperature = 1.0
@@ -65,7 +65,7 @@ ext-llm-temperature = 1.0
 ext-llm-max-tokens = 1024
 
 # Custom system prompt (optional)
-ext-llm-system-prompt = You are a helpful Linux command assistant...
+ext-llm-system-prompt = "You are a helpful Linux command assistant..."
 
 # Number of prompts to keep in history (default: 50)
 ext-llm-history-size = 50
@@ -118,12 +118,17 @@ Add provider-specific API keys to your Ghostty configuration file:
 
 ```ini
 # Configure your preferred provider(s)
-ext-llm-anthropic-api-key = sk-ant-your_anthropic_key_here
-ext-llm-openai-api-key = sk-your_openai_key_here
-ext-llm-gemini-api-key = your_gemini_key_here
+ext-llm-anthropic-api-key = "..."  # your Anthropic API key
+ext-llm-openai-api-key = "..."     # your OpenAI API key
+ext-llm-gemini-api-key = "..."     # your Google Gemini API key
 
-# Choose your active provider
+# Choose your active provider (optional - defaults to anthropic)
 ext-llm-provider = anthropic
+
+# Optionally configure provider-specific models
+ext-llm-anthropic-model = "claude-3-7-sonnet-latest"
+ext-llm-openai-model = "gpt-4.1"
+ext-llm-gemini-model = "gemini-2.5-flash"
 ```
 
 ### 3. Switch Providers Easily

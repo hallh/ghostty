@@ -207,19 +207,27 @@ test {
     _ = @import("llm_assistant/gemini.zig");
 }
 
-test "provider-specific API keys" {
+test "provider-specific API keys and models" {
     const testing = std.testing;
 
-    // Test all providers have their specific keys
+    // Test all providers have their specific keys and models
     {
         var cfg = config.Config{};
         cfg.@"ext-llm-anthropic-api-key" = "anthropic-key";
         cfg.@"ext-llm-openai-api-key" = "openai-key";
         cfg.@"ext-llm-gemini-api-key" = "gemini-key";
 
+        cfg.@"ext-llm-anthropic-model" = "anthropic-model";
+        cfg.@"ext-llm-openai-model" = "openai-model";
+        cfg.@"ext-llm-gemini-model" = "gemini-model";
+
         try testing.expectEqualStrings("anthropic-key", getApiKeyForProvider(&cfg, .anthropic).?);
         try testing.expectEqualStrings("openai-key", getApiKeyForProvider(&cfg, .openai).?);
         try testing.expectEqualStrings("gemini-key", getApiKeyForProvider(&cfg, .gemini).?);
+
+        try testing.expectEqualStrings("anthropic-model", cfg.@"ext-llm-anthropic-model".?);
+        try testing.expectEqualStrings("openai-model", cfg.@"ext-llm-openai-model".?);
+        try testing.expectEqualStrings("gemini-model", cfg.@"ext-llm-gemini-model".?);
     }
 
     // Test isConfigured with provider-specific keys
@@ -231,21 +239,21 @@ test "provider-specific API keys" {
         try testing.expect(isConfigured(&cfg));
     }
 
-    // Test isConfigured with no keys
+    // Test missing provider-specific key
     {
         var cfg = config.Config{};
         cfg.@"ext-llm-provider" = .anthropic;
+        // No anthropic key set
 
         try testing.expect(!isConfigured(&cfg));
     }
 
-    // Test missing provider-specific key returns null
+    // Test provider-specific models return null when not set
     {
-        var cfg = config.Config{};
-        cfg.@"ext-llm-openai-api-key" = "openai-key";
-        // No anthropic key set
+        const cfg = config.Config{};
 
-        try testing.expect(getApiKeyForProvider(&cfg, .anthropic) == null);
-        try testing.expectEqualStrings("openai-key", getApiKeyForProvider(&cfg, .openai).?);
+        try testing.expect(cfg.@"ext-llm-anthropic-model" == null);
+        try testing.expect(cfg.@"ext-llm-openai-model" == null);
+        try testing.expect(cfg.@"ext-llm-gemini-model" == null);
     }
 }

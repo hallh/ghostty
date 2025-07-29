@@ -3087,17 +3087,29 @@ term: []const u8 = "xterm-ghostty",
 /// Available since: 1.3.0
 @"ext-llm-provider": LLMProvider = .anthropic,
 
-/// Model name to use for the configured provider. If not specified, uses
-/// the provider's default model:
+/// Model to use for Anthropic Claude. Overrides the default Anthropic model.
+/// Get available models from: https://docs.anthropic.com/en/docs/about-claude/models
 ///
-///   * Anthropic: `claude-3-5-sonnet-20241022`
-///   * OpenAI: `gpt-4o`
-///   * Gemini: `gemini-2.0-flash`
-///
-/// Check your provider's documentation for available models.
+/// Example: `ext-llm-anthropic-model = "claude-3-7-sonnet-latest"`
 ///
 /// Available since: 1.3.0
-@"ext-llm-model": ?[]const u8 = null,
+@"ext-llm-anthropic-model": ?[]const u8 = null,
+
+/// Model to use for OpenAI GPT. Overrides the default OpenAI model.
+/// Get available models from: https://platform.openai.com/docs/models
+///
+/// Example: `ext-llm-openai-model = "gpt-4.1"`
+///
+/// Available since: 1.3.0
+@"ext-llm-openai-model": ?[]const u8 = null,
+
+/// Model to use for Google Gemini. Overrides the default Gemini model.
+/// Get available models from: https://ai.google.dev/gemini-api/docs/models/gemini
+///
+/// Example: `ext-llm-gemini-model = "gemini-2.5-flash"`
+///
+/// Available since: 1.3.0
+@"ext-llm-gemini-model": ?[]const u8 = null,
 
 /// Temperature for response generation. Lower values make the
 /// model more focused and deterministic, higher values make it more creative

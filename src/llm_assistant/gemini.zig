@@ -115,8 +115,11 @@ pub const GeminiProvider = struct {
         const provider = try allocator.create(GeminiProvider);
         errdefer allocator.destroy(provider);
 
+        // Get provider-specific model or use default
+        const model = cfg.@"ext-llm-gemini-model" orelse DEFAULTS.model;
+
         provider.* = GeminiProvider{
-            .base = try provider_base.BaseProvider.init(allocator, api_key, cfg, DEFAULTS),
+            .base = try provider_base.BaseProvider.init(allocator, api_key, model, cfg, DEFAULTS),
         };
 
         return provider;
