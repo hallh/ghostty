@@ -162,9 +162,6 @@ pub const OpenAIProvider = struct {
         response_json: []const u8,
         status: std.http.Status,
     ) llm.LLMError!llm.LLMResponse {
-        // Log the raw JSON response for debugging
-        log.debug("OpenAI raw JSON response (status {d}): {s}", .{ @intFromEnum(status), response_json });
-
         if (status.class() != .success) {
             // Try to parse error response
             if (std.json.parseFromSlice(OpenAIResponse, allocator, response_json, .{

@@ -435,24 +435,12 @@ fn submitRequest(self: *LLMAssistantDialog) void {
     else
         null;
 
-    log.info("[LLM_DEBUG] Terminal context enabled: {}", .{include_context});
-    log.info("[LLM_DEBUG] Terminal context available: {}", .{terminal_context != null});
-    if (terminal_context) |ctx| {
-        log.info("[LLM_DEBUG] Current input full line: '{any}'", .{ctx.current_input_full_line});
-    }
-
     // Create enhanced prompt with context only if context is enabled and available
     const enhanced_prompt = if (include_context and terminal_context != null)
         llm_prompt_builder.createEnhancedPrompt(self.arena.allocator(), text, terminal_context.?) catch text
     else
         text;
     // Don't free enhanced_prompt here - it will be used by the background thread
-
-    log.info("[LLM_DEBUG] Original prompt: '{s}'", .{text});
-    log.info("[LLM_DEBUG] Enhanced prompt length: {}", .{enhanced_prompt.len});
-    log.info("[LLM_DEBUG] Enhanced prompt preview: '{s}'", .{enhanced_prompt});
-
-    log.info("[LLM_DEBUG] Enhanced prompt ready with length: {}", .{enhanced_prompt.len});
 
     // Create worker request with terminal context only if enabled
     const worker_request = llm_worker.WorkerRequest{
@@ -465,7 +453,8 @@ fn submitRequest(self: *LLMAssistantDialog) void {
         .allocator = self.arena.allocator(),
     };
 
-    log.info("[LLM_DEBUG] About to process LLM request using worker module", .{});
+    // Log which provider is being queried
+    log.debug("Querying LLM provider: {}", .{self.window.app.config.@"ext-llm-provider"});
 
     // Process request using worker module
     llm_worker.processRequest(
@@ -618,18 +607,14 @@ fn acceptSuggestion(self: *LLMAssistantDialog) void {
                     const display = gdk.Display.getDefault() orelse return;
                     const clipboard = gdk.Display.getClipboard(display);
                     gdk.Clipboard.setText(clipboard, @ptrCast(response.ptr));
-                    log.info("Command copied to clipboard as fallback: {s}", .{response});
                     return;
                 };
-
-                log.info("Command inserted into terminal: {s}", .{response});
             } else {
                 log.warn("No active surface found to insert command", .{});
                 // Fallback: copy to clipboard
                 const display = gdk.Display.getDefault() orelse return;
                 const clipboard = gdk.Display.getClipboard(display);
                 gdk.Clipboard.setText(clipboard, @ptrCast(response.ptr));
-                log.info("Command copied to clipboard as fallback: {s}", .{response});
             }
         }
     }
