@@ -160,3 +160,148 @@ test "BaseProvider memory management" {
         try testing.expect(result.len > 0);
     }
 }
+
+test "BaseProvider.init success case" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Create a minimal config for testing
+    var cfg = config.Config{};
+    cfg.@"ext-llm-model" = "test-model";
+    cfg.@"ext-llm-temperature" = 0.5;
+    cfg.@"ext-llm-max-tokens" = 2048;
+    cfg.@"ext-llm-system-prompt" = "test system prompt";
+
+    const defaults = provider_base.Defaults{
+        .model = "default-model",
+    };
+
+    var base = try provider_base.BaseProvider.init(allocator, "test-api-key", &cfg, defaults);
+    defer base.deinit(allocator);
+
+    // Verify strings were copied properly
+    try testing.expectEqualStrings("test-api-key", base.api_key);
+    try testing.expectEqualStrings("test-model", base.model);
+    try testing.expectEqualStrings("test system prompt", base.system_prompt);
+    try testing.expect(base.temperature == 0.5);
+    try testing.expect(base.max_tokens == 2048);
+}
+
+test "BaseProvider.init with defaults" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Create a minimal config with nulls to test defaults
+    var cfg = config.Config{};
+    cfg.@"ext-llm-model" = null;
+    cfg.@"ext-llm-temperature" = 0.7;
+    cfg.@"ext-llm-max-tokens" = 1024;
+    cfg.@"ext-llm-system-prompt" = null;
+
+    const defaults = provider_base.Defaults{
+        .model = "default-model",
+        .temperature = 0.1,
+        .max_tokens = 512,
+        .system_prompt = "default system prompt",
+    };
+
+    var base = try provider_base.BaseProvider.init(allocator, "test-api-key", &cfg, defaults);
+    defer base.deinit(allocator);
+
+    // Verify defaults were used
+    try testing.expectEqualStrings("test-api-key", base.api_key);
+    try testing.expectEqualStrings("default-model", base.model);
+    try testing.expectEqualStrings("default system prompt", base.system_prompt);
+    try testing.expect(base.temperature == 0.7); // From config
+    try testing.expect(base.max_tokens == 1024); // From config
+}
+
+// Mock allocator that fails after a certain number of allocations
+const FailingAllocator = struct {
+    backing_allocator: std.mem.Allocator,
+    fail_after: usize,
+    allocation_count: usize = 0,
+
+    const Self = @This();
+
+    fn alloc(ctx: *anyopaque, len: usize, ptr_align: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *Self = @ptrCast(@alignCast(ctx));
+        self.allocation_count += 1;
+        if (self.allocation_count > self.fail_after) {
+            return null;
+        }
+        return self.backing_allocator.rawAlloc(len, ptr_align, ret_addr);
+    }
+
+    fn resize(ctx: *anyopaque, buf: []u8, buf_align: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *Self = @ptrCast(@alignCast(ctx));
+        return self.backing_allocator.rawResize(buf, buf_align, new_len, ret_addr);
+    }
+
+    fn free(ctx: *anyopaque, buf: []u8, buf_align: std.mem.Alignment, ret_addr: usize) void {
+        const self: *Self = @ptrCast(@alignCast(ctx));
+        return self.backing_allocator.rawFree(buf, buf_align, ret_addr);
+    }
+
+    fn allocator(self: *Self) std.mem.Allocator {
+        return std.mem.Allocator{
+            .ptr = self,
+            .vtable = &.{
+                .alloc = alloc,
+                .resize = resize,
+                .free = free,
+                .remap = std.mem.Allocator.noRemap,
+            },
+        };
+    }
+};
+
+test "BaseProvider.init handles allocation failures properly" {
+    var cfg = config.Config{};
+    cfg.@"ext-llm-model" = "test-model";
+    cfg.@"ext-llm-temperature" = 0.5;
+    cfg.@"ext-llm-max-tokens" = 2048;
+    cfg.@"ext-llm-system-prompt" = "test system prompt";
+
+    const defaults = provider_base.Defaults{
+        .model = "default-model",
+    };
+
+    // Test failure after first allocation (api_key duplication fails)
+    {
+        var failing_allocator = FailingAllocator{
+            .backing_allocator = testing.allocator,
+            .fail_after = 0,
+        };
+        const allocator = failing_allocator.allocator();
+
+        const result = provider_base.BaseProvider.init(allocator, "test-api-key", &cfg, defaults);
+        try testing.expectError(error.OutOfMemory, result);
+    }
+
+    // Test failure after second allocation (model duplication fails, api_key should be cleaned up)
+    {
+        var failing_allocator = FailingAllocator{
+            .backing_allocator = testing.allocator,
+            .fail_after = 1,
+        };
+        const allocator = failing_allocator.allocator();
+
+        const result = provider_base.BaseProvider.init(allocator, "test-api-key", &cfg, defaults);
+        try testing.expectError(error.OutOfMemory, result);
+    }
+
+    // Test failure after third allocation (system_prompt duplication fails, api_key and model should be cleaned up)
+    {
+        var failing_allocator = FailingAllocator{
+            .backing_allocator = testing.allocator,
+            .fail_after = 2,
+        };
+        const allocator = failing_allocator.allocator();
+
+        const result = provider_base.BaseProvider.init(allocator, "test-api-key", &cfg, defaults);
+        try testing.expectError(error.OutOfMemory, result);
+    }
+}

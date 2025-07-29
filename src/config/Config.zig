@@ -417,8 +417,7 @@ pub const compatibility = std.StaticStringMap(
 /// The method to use for calculating the cell width of a grapheme cluster.
 /// The default value is `unicode` which uses the Unicode standard to determine
 /// grapheme width. This results in correct grapheme width but may result in
-/// cursor-desync issues with some programs (such as shells) that may use a
-/// legacy method such as `wcswidth`.
+/// cursor-desync issues with some programs (such as `wcswidth`).
 ///
 /// Valid values are:
 ///
@@ -2257,7 +2256,7 @@ keybind: Keybinds = .{},
 /// (`:`), and then the specified value. The syntax for actions is identical
 /// to the one for keybind actions. Whitespace in between fields is ignored.
 ///
-/// ```ini
+/// ```
 /// command-palette-entry = title:Reset Font Style, action:csi:0m
 /// command-palette-entry = title:Crash on Main Thread,description:Causes a crash on the main (UI) thread.,action:crash:main
 /// ```
@@ -2267,7 +2266,7 @@ keybind: Keybinds = .{},
 /// memorizable shortcuts. The default entries can be cleared by setting this
 /// setting to an empty value:
 ///
-/// ```ini
+/// ```
 /// command-palette-entry =
 /// ```
 ///
@@ -3052,14 +3051,29 @@ term: []const u8 = "xterm-ghostty",
 /// This only works on macOS since only macOS has an auto-update feature.
 @"auto-update-channel": ?build_config.ReleaseChannel = null,
 
-/// API key for LLM command assistant. This key will be used to authenticate
-/// requests to the configured LLM provider. Store this securely in your
-/// configuration file.
+/// API key for Anthropic Claude models. Store this securely in your
+/// configuration file. Get your API key from: https://console.anthropic.com/
 ///
-/// Example: `ext-llm-api-key = "your-api-key-here"`
+/// Example: `ext-llm-anthropic-api-key = "sk-ant-..."`
 ///
 /// Available since: 1.3.0
-@"ext-llm-api-key": ?[]const u8 = null,
+@"ext-llm-anthropic-api-key": ?[]const u8 = null,
+
+/// API key for OpenAI GPT models. Store this securely in your
+/// configuration file. Get your API key from: https://platform.openai.com/api-keys
+///
+/// Example: `ext-llm-openai-api-key = "sk-..."`
+///
+/// Available since: 1.3.0
+@"ext-llm-openai-api-key": ?[]const u8 = null,
+
+/// API key for Google Gemini models. Store this securely in your
+/// configuration file. Get your API key from: https://aistudio.google.com/app/apikey
+///
+/// Example: `ext-llm-gemini-api-key = "AIza..."`
+///
+/// Available since: 1.3.0
+@"ext-llm-gemini-api-key": ?[]const u8 = null,
 
 /// LLM provider to use for command suggestions. Supported providers are:
 ///
@@ -3085,20 +3099,18 @@ term: []const u8 = "xterm-ghostty",
 /// Available since: 1.3.0
 @"ext-llm-model": ?[]const u8 = null,
 
-/// Temperature for response generation (0.0-1.0). Lower values make the
+/// Temperature for response generation. Lower values make the
 /// model more focused and deterministic, higher values make it more creative
 /// and random. For command suggestions, lower values (0.1-0.3) are typically
 /// better for consistent, accurate results.
-///
-/// Available since: 1.3.0
-@"ext-llm-temperature": f32 = 0.1,
+@"ext-llm-temperature": f32 = 1,
 
 /// Maximum number of tokens to generate in the response. This controls the
 /// length of the command suggestion. For most command suggestions, 1024
 /// tokens should be more than sufficient.
 ///
 /// Available since: 1.3.0
-@"ext-llm-max-tokens": u32 = 1024,
+@"ext-llm-max-tokens": u32 = 4096,
 
 /// Custom system prompt to override the default. The default prompt instructs
 /// the model to provide only the exact command needed without explanation.
@@ -3107,15 +3119,11 @@ term: []const u8 = "xterm-ghostty",
 /// Default: "You are a Linux command assistant. Given a user's description,
 /// provide only the exact command they need. Respond with just the command,
 /// no explanation."
-///
-/// Available since: 1.3.0
 @"ext-llm-system-prompt": ?[]const u8 = null,
 
 /// Number of previous prompts to keep in history for navigation with up/down
 /// arrow keys. History is kept in memory only and is cleared when Ghostty
 /// exits.
-///
-/// Available since: 1.3.0
 @"ext-llm-history-size": u32 = 50,
 
 /// This is set by the CLI parser for deinit.

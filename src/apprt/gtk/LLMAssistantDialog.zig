@@ -343,8 +343,8 @@ fn submitRequest(self: *LLMAssistantDialog) void {
     // Check if LLM provider is available
     const provider = self.llm_provider orelse {
         const config = &self.window.app.config;
-        if (config.@"ext-llm-api-key" == null) {
-            self.showError(std.mem.span(i18n._("LLM assistant requires configuration. Please set your API key with 'ext-llm-api-key' in your configuration file.")));
+        if (!llm.isConfigured(config)) {
+            self.showError(std.mem.span(llm.getConfigurationError(config)));
         } else {
             self.showError(std.mem.span(i18n._("LLM provider failed to initialize. Please check your configuration and try again.")));
         }

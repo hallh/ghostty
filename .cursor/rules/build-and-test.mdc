@@ -1,0 +1,5 @@
+---
+alwaysApply: true
+---
+
+After every generation use @./agents/check_coverage.sh to lint, build, test, and check coverage of your changes. By default it'll compare coverage for all uncommitted files that have been edited or added in this session, but for longer developments with committed code on the branch you can use the -m flag to compare against main. You do not need to run tests or builds separately unless instructed to, this script will run everything you need to get feedback on your changes.

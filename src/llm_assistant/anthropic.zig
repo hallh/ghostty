@@ -17,7 +17,7 @@ pub const AnthropicProvider = struct {
 
     /// Provider-specific defaults
     const DEFAULTS = provider_base.Defaults{
-        .model = "claude-3-5-sonnet-20241022",
+        .model = "claude-3-7-sonnet-latest",
     };
 
     /// Anthropic request structure
@@ -153,6 +153,9 @@ pub const AnthropicProvider = struct {
         response_json: []const u8,
         status: std.http.Status,
     ) llm.LLMError!llm.LLMResponse {
+        // Log the raw JSON response for debugging
+        log.debug("Anthropic raw JSON response (status {d}): {s}", .{ @intFromEnum(status), response_json });
+
         if (status.class() != .success) {
             // Try to parse error response
             if (std.json.parseFromSlice(AnthropicResponse, allocator, response_json, .{

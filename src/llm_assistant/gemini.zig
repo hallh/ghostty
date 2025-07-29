@@ -17,7 +17,8 @@ pub const GeminiProvider = struct {
 
     /// Provider-specific defaults
     const DEFAULTS = provider_base.Defaults{
-        .model = "gemini-1.5-flash",
+        .model = "gemini-2.5-flash",
+        // Note: max_tokens intentionally omitted due to Gemini API bug with token limiting
     };
 
     /// Gemini request structure
@@ -173,11 +174,8 @@ pub const GeminiProvider = struct {
         const content = GeminiRequest.Content{ .role = "user", .parts = &[_]GeminiRequest.Content.Part{content_part} };
 
         var generation_config = GeminiRequest.GenerationConfig{};
-        if (req.max_tokens) |max_tokens| {
-            generation_config.maxOutputTokens = max_tokens;
-        } else {
-            generation_config.maxOutputTokens = self.base.max_tokens;
-        }
+        // Note: maxOutputTokens intentionally omitted due to Gemini API bug with token limiting
+        // that causes empty responses when combined with internal reasoning tokens
         if (req.temperature) |temp| {
             generation_config.temperature = temp;
         } else {
@@ -203,6 +201,9 @@ pub const GeminiProvider = struct {
         response_json: []const u8,
         status: std.http.Status,
     ) llm.LLMError!llm.LLMResponse {
+        // Log the raw JSON response for debugging
+        log.debug("Gemini raw JSON response (status {d}): {s}", .{ @intFromEnum(status), response_json });
+
         if (status.class() != .success) {
             // Try to parse error response
             if (std.json.parseFromSlice(GeminiResponse, allocator, response_json, .{
@@ -235,6 +236,18 @@ pub const GeminiProvider = struct {
         // Extract command text from the first candidate
         if (response.candidates.len > 0) {
             const candidate = response.candidates[0];
+
+            // Check for MAX_TOKENS finish reason with empty/minimal text
+            if (candidate.finishReason) |finish_reason| {
+                if (std.mem.eql(u8, finish_reason, "MAX_TOKENS")) {
+                    const error_msg = try allocator.dupe(u8, "Response truncated due to token limit. Try increasing max_tokens or simplifying the request.");
+                    return llm.LLMResponse{
+                        .command = "",
+                        .error_message = error_msg,
+                    };
+                }
+            }
+
             if (candidate.content) |content| {
                 if (content.parts.len > 0) {
                     if (content.parts[0].text) |text| {

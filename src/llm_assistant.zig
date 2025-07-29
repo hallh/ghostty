@@ -131,13 +131,29 @@ pub const HTTPClient = struct {
 
 /// Check if LLM is properly configured
 pub fn isConfigured(cfg: *const config.Config) bool {
-    return cfg.@"ext-llm-api-key" != null;
+    return getApiKeyForProvider(cfg, cfg.@"ext-llm-provider") != null;
+}
+
+/// Get the appropriate API key for the given provider
+fn getApiKeyForProvider(cfg: *const config.Config, provider: config.Config.LLMProvider) ?[]const u8 {
+    return switch (provider) {
+        .anthropic => cfg.@"ext-llm-anthropic-api-key",
+        .openai => cfg.@"ext-llm-openai-api-key",
+        .gemini => cfg.@"ext-llm-gemini-api-key",
+    };
 }
 
 /// Get a user-friendly configuration error message
 pub fn getConfigurationError(cfg: *const config.Config) [*:0]const u8 {
-    if (cfg.@"ext-llm-api-key" == null) {
-        return "LLM assistant requires an API key. Please set 'ext-llm-api-key' in your configuration.";
+    const provider = cfg.@"ext-llm-provider";
+    const api_key = getApiKeyForProvider(cfg, provider);
+
+    if (api_key == null) {
+        return switch (provider) {
+            .anthropic => "LLM assistant requires an Anthropic API key. Please set 'ext-llm-anthropic-api-key' in your configuration.",
+            .openai => "LLM assistant requires an OpenAI API key. Please set 'ext-llm-openai-api-key' in your configuration.",
+            .gemini => "LLM assistant requires a Gemini API key. Please set 'ext-llm-gemini-api-key' in your configuration.",
+        };
     }
     return "LLM configuration is incomplete. Please check your settings.";
 }
@@ -148,7 +164,7 @@ pub fn createProvider(
     cfg: *const config.Config,
 ) LLMError!LLMProvider {
     const provider_type = cfg.@"ext-llm-provider";
-    const api_key = cfg.@"ext-llm-api-key" orelse return LLMError.InvalidConfiguration;
+    const api_key = getApiKeyForProvider(cfg, provider_type) orelse return LLMError.InvalidConfiguration;
 
     switch (provider_type) {
         .anthropic => {
@@ -189,4 +205,47 @@ test {
     _ = @import("llm_assistant/openai.zig");
     _ = @import("llm_assistant/anthropic.zig");
     _ = @import("llm_assistant/gemini.zig");
+}
+
+test "provider-specific API keys" {
+    const testing = std.testing;
+
+    // Test all providers have their specific keys
+    {
+        var cfg = config.Config{};
+        cfg.@"ext-llm-anthropic-api-key" = "anthropic-key";
+        cfg.@"ext-llm-openai-api-key" = "openai-key";
+        cfg.@"ext-llm-gemini-api-key" = "gemini-key";
+
+        try testing.expectEqualStrings("anthropic-key", getApiKeyForProvider(&cfg, .anthropic).?);
+        try testing.expectEqualStrings("openai-key", getApiKeyForProvider(&cfg, .openai).?);
+        try testing.expectEqualStrings("gemini-key", getApiKeyForProvider(&cfg, .gemini).?);
+    }
+
+    // Test isConfigured with provider-specific keys
+    {
+        var cfg = config.Config{};
+        cfg.@"ext-llm-openai-api-key" = "openai-key";
+        cfg.@"ext-llm-provider" = .openai;
+
+        try testing.expect(isConfigured(&cfg));
+    }
+
+    // Test isConfigured with no keys
+    {
+        var cfg = config.Config{};
+        cfg.@"ext-llm-provider" = .anthropic;
+
+        try testing.expect(!isConfigured(&cfg));
+    }
+
+    // Test missing provider-specific key returns null
+    {
+        var cfg = config.Config{};
+        cfg.@"ext-llm-openai-api-key" = "openai-key";
+        // No anthropic key set
+
+        try testing.expect(getApiKeyForProvider(&cfg, .anthropic) == null);
+        try testing.expectEqualStrings("openai-key", getApiKeyForProvider(&cfg, .openai).?);
+    }
 }

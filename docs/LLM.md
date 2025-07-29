@@ -18,19 +18,19 @@ Ghostty supports three major LLM providers:
 
 ### 1. **Anthropic Claude** (Default)
 - **Provider ID**: `anthropic`
-- **Default Model**: `claude-3-5-sonnet-20241022`
+- **Default Model**: `claude-3-7-sonnet-latest`
 - **API Endpoint**: https://api.anthropic.com/v1
 - **Get API Key**: [Anthropic Console](https://console.anthropic.com/)
 
 ### 2. **OpenAI GPT**
 - **Provider ID**: `openai`
-- **Default Model**: `gpt-4o-mini`
+- **Default Model**: `gpt-4.1`
 - **API Endpoint**: https://api.openai.com/v1
 - **Get API Key**: [OpenAI Platform](https://platform.openai.com/api-keys)
 
 ### 3. **Google Gemini**
 - **Provider ID**: `gemini`
-- **Default Model**: `gemini-1.5-flash`
+- **Default Model**: `gemini-2.5-flash`
 - **API Endpoint**: https://generativelanguage.googleapis.com/v1beta
 - **Get API Key**: [Google AI Studio](https://aistudio.google.com/app/apikey)
 
@@ -41,8 +41,10 @@ Add the following settings to your Ghostty configuration file:
 ### Required Configuration
 
 ```ini
-# Set your API key (REQUIRED)
-ext-llm-api-key = your_api_key_here
+# Set provider-specific API keys (REQUIRED)
+ext-llm-anthropic-api-key = sk-ant-your_anthropic_key_here
+ext-llm-openai-api-key = sk-your_openai_key_here  
+ext-llm-gemini-api-key = your_gemini_key_here
 
 # Choose your provider (optional - defaults to anthropic)
 ext-llm-provider = anthropic  # or openai, gemini
@@ -52,12 +54,12 @@ ext-llm-provider = anthropic  # or openai, gemini
 
 ```ini
 # Model to use (optional - uses provider defaults)
-ext-llm-model = claude-3-5-sonnet-20241022  # for Anthropic
-# ext-llm-model = gpt-4o                     # for OpenAI
-# ext-llm-model = gemini-1.5-pro             # for Google
+ext-llm-model = claude-3-7-sonnet-latest  # for Anthropic
+# ext-llm-model = gpt-4.1                 # for OpenAI
+# ext-llm-model = gemini-2.5-flash        # for Google
 
-# Temperature for response generation (0.0-1.0, default: 0.1)
-ext-llm-temperature = 0.1
+# Temperature for response generation (default: 1.0)
+ext-llm-temperature = 1.0
 
 # Maximum tokens in response (default: 1024)
 ext-llm-max-tokens = 1024
@@ -69,11 +71,27 @@ ext-llm-system-prompt = You are a helpful Linux command assistant...
 ext-llm-history-size = 50
 ```
 
+### Multiple Provider Setup
+
+With provider-specific API keys, you can easily switch between providers without changing keys:
+
+```ini
+# Configure all three providers
+ext-llm-anthropic-api-key = sk-ant-your_anthropic_key_here
+ext-llm-openai-api-key = sk-your_openai_key_here
+ext-llm-gemini-api-key = your_gemini_key_here
+
+# Switch providers by changing this line
+ext-llm-provider = anthropic  # Change to openai or gemini anytime
+
+# Each provider will use its specific API key automatically
+```
+
 ## Setup Instructions
 
-### 1. Get an API Key
+### 1. Get API Keys
 
-Choose one of the supported providers and obtain an API key:
+You can set up one or all of the supported providers:
 
 **For Anthropic Claude:**
 1. Visit [Anthropic Console](https://console.anthropic.com/)
@@ -96,21 +114,27 @@ Choose one of the supported providers and obtain an API key:
 
 ### 2. Configure Ghostty
 
-Add your API key to your Ghostty configuration file:
+Add provider-specific API keys to your Ghostty configuration file:
 
 ```ini
-# Minimum required configuration
-ext-llm-api-key = your_api_key_here
+# Configure your preferred provider(s)
+ext-llm-anthropic-api-key = sk-ant-your_anthropic_key_here
+ext-llm-openai-api-key = sk-your_openai_key_here
+ext-llm-gemini-api-key = your_gemini_key_here
+
+# Choose your active provider
+ext-llm-provider = anthropic
 ```
 
-### 3. Optional: Choose Provider
+### 3. Switch Providers Easily
 
-If you want to use a provider other than Anthropic (default):
+Once you have multiple API keys configured, switching providers is simple:
 
-```ini
-ext-llm-provider = openai    # or gemini
-ext-llm-api-key = your_openai_api_key_here
-```
+1. **Edit config**: Change `ext-llm-provider = openai` (or gemini)
+2. **Reload config**: Use Ghostty's "Reload Configuration" menu option
+3. **Done**: Next LLM requests will use the new provider
+
+No need to change API keys when switching!
 
 ## Usage
 
@@ -224,16 +248,17 @@ ext-llm-system-prompt = You are a helpful Linux system administrator. Provide co
 Each provider offers different models with varying capabilities:
 
 **Anthropic Models:**
-- `claude-3-5-sonnet-20241022` (default) - Best balance
+- `claude-3-7-sonnet-latest` (default) - Latest and best balance
 - `claude-3-5-haiku-20241022` - Fastest, most economical
 
 **OpenAI Models:**
-- `gpt-4o-mini` (default) - Very cost-effective
-- `gpt-4o` - Most capable but more expensive
+- `gpt-4.1` (default) - Latest capability and performance
+- `gpt-4o-mini` - Very cost-effective
+- `gpt-4o` - Capable but more expensive
 - `gpt-3.5-turbo` - Good balance of speed and cost
 
 **Google Models:**
-- `gemini-1.5-flash` (default) - Fast and efficient
+- `gemini-2.5-flash` (default) - Latest fast and efficient model
 - `gemini-1.5-pro` - More capable for complex requests
 
 ## Architecture

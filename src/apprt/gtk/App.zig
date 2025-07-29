@@ -1062,6 +1062,10 @@ fn configChange(
                     const surface = core_surface.rt_surface;
                     if (surface.container.window()) |window| {
                         window.onConfigReloaded();
+                        // Update window config to ensure all components (including LLM dialog) are updated
+                        window.updateConfig(&self.config) catch |err| {
+                            log.warn("error updating config for window err={}", .{err});
+                        };
                         break :window window;
                     }
                 }

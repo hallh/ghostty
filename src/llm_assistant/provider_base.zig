@@ -42,19 +42,32 @@ pub const BaseProvider = struct {
         cfg: *const config.Config,
         defaults: Defaults,
     ) !Self {
+        // Copy all strings to ensure they remain valid after config reload
+        const owned_api_key = try allocator.dupe(u8, api_key);
+        errdefer allocator.free(owned_api_key);
+
+        const owned_model = try allocator.dupe(u8, cfg.@"ext-llm-model" orelse defaults.model);
+        errdefer allocator.free(owned_model);
+
+        const owned_system_prompt = try allocator.dupe(u8, cfg.@"ext-llm-system-prompt" orelse defaults.system_prompt);
+        errdefer allocator.free(owned_system_prompt);
+
         return Self{
             .http_client = llm.HTTPClient.init(allocator),
-            .api_key = api_key,
-            .model = cfg.@"ext-llm-model" orelse defaults.model,
+            .api_key = owned_api_key,
+            .model = owned_model,
             .temperature = cfg.@"ext-llm-temperature",
             .max_tokens = cfg.@"ext-llm-max-tokens",
-            .system_prompt = cfg.@"ext-llm-system-prompt" orelse defaults.system_prompt,
+            .system_prompt = owned_system_prompt,
         };
     }
 
     /// Clean up BaseProvider
     pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
-        _ = allocator; // unused
+        // Free all owned strings
+        allocator.free(self.api_key);
+        allocator.free(self.model);
+        allocator.free(self.system_prompt);
         self.http_client.deinit();
     }
 
