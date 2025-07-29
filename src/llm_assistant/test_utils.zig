@@ -177,3 +177,73 @@ pub const TestStreamContext = struct {
         }
     }
 };
+
+/// Mock HTTP client for testing - replaces llm.HTTPClient interface
+/// This consolidates the MockHTTPClient implementations from all provider files
+pub const MockHTTPClient = struct {
+    response_chunks: []const []const u8 = &[_][]const u8{},
+    error_to_return: ?anyerror = null,
+    status_code: std.http.Status = .ok,
+    should_fail_open: bool = false,
+    should_fail_write: bool = false,
+    should_fail_read: bool = false,
+
+    const Self = @This();
+
+    pub fn init(_: std.mem.Allocator) Self {
+        return Self{};
+    }
+
+    pub fn deinit(_: *Self) void {}
+
+    pub fn postJSON(
+        self: *Self,
+        _: []const u8,
+        _: []const std.http.Header,
+        _: []const u8,
+        response_buffer: *std.ArrayList(u8),
+    ) !std.http.Status {
+        if (self.error_to_return) |err| {
+            return err;
+        }
+
+        // Simulate response
+        if (self.response_chunks.len > 0) {
+            try response_buffer.appendSlice(self.response_chunks[0]);
+        }
+
+        return self.status_code;
+    }
+
+    pub fn postStreamJSON(
+        self: *Self,
+        _: []const u8,
+        _: []const std.http.Header,
+        _: []const u8,
+        callback: anytype, // Generic callback type
+        user_data: ?*anyopaque,
+    ) !void {
+        if (self.error_to_return) |err| {
+            return err;
+        }
+
+        for (self.response_chunks) |chunk| {
+            callback(chunk, user_data);
+        }
+    }
+};
+
+// Basic test to ensure MockHTTPClient error handling works
+test "MockHTTPClient error handling" {
+    const testing = std.testing;
+
+    var mock = MockHTTPClient{
+        .error_to_return = error.ConnectionRefused,
+    };
+
+    var response_buffer = std.ArrayList(u8).init(testing.allocator);
+    defer response_buffer.deinit();
+
+    const result = mock.postJSON("", &[_]std.http.Header{}, "", &response_buffer);
+    try testing.expectError(error.ConnectionRefused, result);
+}

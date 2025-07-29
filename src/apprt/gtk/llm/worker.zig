@@ -7,6 +7,16 @@ const terminal_context = @import("terminal_context.zig");
 const prompt_builder = @import("prompt_builder.zig");
 const TerminalContext = terminal_context.TerminalContext;
 
+/// NOTE: This worker launches a *one-shot detached thread* for each LLM
+/// request and delivers the result back to the UI thread via a glib
+/// idle callback.  Other async subsystems in Ghostty (renderer, IO, CF
+/// release, etc.) use a long-lived thread + `BlockingQueue` mailbox
+/// because they process a continuous stream of messages.  For the LLM
+/// assistant the workload is bursty (user presses Ctrl+Shift+K, one
+/// request), so spinning up a throw-away thread avoids keeping an idle
+/// thread and queue alive.  If we ever introduce streaming responses or
+/// high-frequency requests, migrating to the mailbox model or a thread
+/// pool would be appropriate.
 pub const WorkerRequest = struct {
     prompt: []const u8,
     terminal_context: ?TerminalContext = null,

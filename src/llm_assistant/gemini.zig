@@ -275,31 +275,8 @@ pub const GeminiProvider = struct {
 
     /// Clean up command text to ensure it's a valid shell command
     fn cleanCommandText(self: *Self, allocator: std.mem.Allocator, text: []const u8) llm.LLMError![]u8 {
-        _ = self;
-
-        // Trim whitespace
-        const trimmed = std.mem.trim(u8, text, " \t\n\r");
-
-        // Remove markdown code blocks if present
-        var cleaned = trimmed;
-        if (std.mem.startsWith(u8, cleaned, "```")) {
-            if (std.mem.indexOf(u8, cleaned[3..], "\n")) |newline_pos| {
-                cleaned = cleaned[3 + newline_pos + 1 ..];
-            }
-        }
-        if (std.mem.endsWith(u8, cleaned, "```")) {
-            cleaned = cleaned[0 .. cleaned.len - 3];
-        }
-
-        // Remove backticks if present
-        if (std.mem.startsWith(u8, cleaned, "`") and std.mem.endsWith(u8, cleaned, "`")) {
-            cleaned = cleaned[1 .. cleaned.len - 1];
-        }
-
-        // Final trim
-        cleaned = std.mem.trim(u8, cleaned, " \t\n\r");
-
-        return try allocator.dupe(u8, cleaned);
+        _ = self; // no instance-specific behavior
+        return provider_base.BaseProvider.cleanCommandText(allocator, text);
     }
 };
 
@@ -309,124 +286,15 @@ pub const GeminiProvider = struct {
 
 const testing = std.testing;
 
-/// Mock HTTP client for testing - replaces llm.HTTPClient interface
-const MockHTTPClient = struct {
-    response_chunks: []const []const u8 = &[_][]const u8{},
-    error_to_return: ?anyerror = null,
-    status_code: std.http.Status = .ok,
-    should_fail_open: bool = false,
-    should_fail_write: bool = false,
-    should_fail_read: bool = false,
+// Use consolidated mock from test_utils
+const MockHTTPClient = test_utils.MockHTTPClient;
 
-    const Self = @This();
-
-    pub fn init(_: std.mem.Allocator) Self {
-        return Self{};
-    }
-
-    pub fn deinit(_: *Self) void {}
-
-    pub fn postJSON(
-        self: *Self,
-        _: []const u8,
-        _: []const std.http.Header,
-        _: []const u8,
-        response_buffer: *std.ArrayList(u8),
-    ) !std.http.Status {
-        if (self.error_to_return) |err| {
-            return err;
-        }
-
-        // Simulate response
-        if (self.response_chunks.len > 0) {
-            try response_buffer.appendSlice(self.response_chunks[0]);
-        }
-
-        return self.status_code;
-    }
-
-    pub fn postStreamJSON(
-        self: *Self,
-        _: []const u8,
-        _: []const std.http.Header,
-        _: []const u8,
-        callback: llm.StreamCallback,
-        user_data: ?*anyopaque,
-    ) !void {
-        if (self.error_to_return) |err| {
-            return err;
-        }
-
-        for (self.response_chunks) |chunk| {
-            callback(chunk, user_data);
-        }
-    }
-};
-
-/// Test context for streaming responses
-const TestStreamContext = struct {
-    allocator: std.mem.Allocator,
-    accumulated_text: std.ArrayList(u8),
-    completion_received: bool = false,
-    error_received: bool = false,
-
-    const Self = @This();
-
-    pub fn init(allocator: std.mem.Allocator) Self {
-        return Self{
-            .allocator = allocator,
-            .accumulated_text = std.ArrayList(u8).init(allocator),
-        };
-    }
-
-    pub fn deinit(self: *Self) void {
-        self.accumulated_text.deinit();
-    }
-
-    pub fn streamCallback(chunk: []const u8, user_data: ?*anyopaque) void {
-        const context: *TestStreamContext = @ptrCast(@alignCast(user_data.?));
-
-        if (std.mem.startsWith(u8, chunk, "__ERROR__")) {
-            context.error_received = true;
-            return;
-        }
-
-        if (std.mem.eql(u8, chunk, "__COMPLETE__")) {
-            context.completion_received = true;
-            return;
-        }
-
-        context.accumulated_text.appendSlice(chunk) catch {
-            context.error_received = true;
-        };
-    }
-};
+// Use consolidated stream context from test_utils
+const TestStreamContext = test_utils.TestStreamContext;
 
 /// Helper function to clean command text for tests
 fn cleanTestCommandText(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
-    // Trim whitespace
-    const trimmed = std.mem.trim(u8, text, " \t\n\r");
-
-    // Remove markdown code blocks if present
-    var cleaned = trimmed;
-    if (std.mem.startsWith(u8, cleaned, "```")) {
-        if (std.mem.indexOf(u8, cleaned[3..], "\n")) |newline_pos| {
-            cleaned = cleaned[3 + newline_pos + 1 ..];
-        }
-    }
-    if (std.mem.endsWith(u8, cleaned, "```")) {
-        cleaned = cleaned[0 .. cleaned.len - 3];
-    }
-
-    // Remove backticks if present
-    if (std.mem.startsWith(u8, cleaned, "`") and std.mem.endsWith(u8, cleaned, "`")) {
-        cleaned = cleaned[1 .. cleaned.len - 1];
-    }
-
-    // Final trim
-    cleaned = std.mem.trim(u8, cleaned, " \t\n\r");
-
-    return try allocator.dupe(u8, cleaned);
+    return provider_base.BaseProvider.cleanCommandText(allocator, text);
 }
 
 /// Test-specific Gemini provider that uses MockHTTPClient

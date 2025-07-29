@@ -224,101 +224,11 @@ pub const OpenAIProvider = struct {
 
 const testing = std.testing;
 
-/// Mock HTTP client for testing - replaces llm.HTTPClient interface
-const MockHTTPClient = struct {
-    response_chunks: []const []const u8 = &[_][]const u8{},
-    error_to_return: ?anyerror = null,
-    status_code: std.http.Status = .ok,
-    should_fail_open: bool = false,
-    should_fail_write: bool = false,
-    should_fail_read: bool = false,
+// Use consolidated mock from test_utils
+const MockHTTPClient = test_utils.MockHTTPClient;
 
-    const Self = @This();
-
-    pub fn init(_: std.mem.Allocator) Self {
-        return Self{};
-    }
-
-    pub fn deinit(_: *Self) void {}
-
-    /// Mock postJSONStream - simulates streaming HTTP response
-    pub fn postJSONStream(
-        self: *Self,
-        _: []const u8, // url
-        _: []const std.http.Header, // headers
-        _: []const u8, // json_payload
-        callback: llm.StreamCallback,
-        user_data: ?*anyopaque,
-    ) llm.LLMError!void {
-        // Test network and connection errors from zig-docs
-        if (self.error_to_return) |err| {
-            return switch (err) {
-                error.ConnectionRefused => llm.LLMError.NetworkError,
-                error.NetworkUnreachable => llm.LLMError.NetworkError,
-                error.ConnectionTimedOut => llm.LLMError.NetworkError,
-                error.UnknownHostName => llm.LLMError.NetworkError,
-                error.TemporaryNameServerFailure => llm.LLMError.NetworkError,
-                error.OutOfMemory => llm.LLMError.OutOfMemory,
-                error.TlsInitializationFailed => llm.LLMError.NetworkError,
-                error.UnsupportedTransferEncoding => llm.LLMError.NetworkError,
-                else => llm.LLMError.APIError,
-            };
-        }
-
-        // Simulate HTTP status code errors
-        if (self.status_code != .ok) {
-            switch (self.status_code) {
-                .unauthorized => return llm.LLMError.AuthenticationError,
-                .too_many_requests => return llm.LLMError.RateLimitExceeded,
-                .bad_request, .forbidden, .not_found => return llm.LLMError.APIError,
-                .internal_server_error, .bad_gateway, .service_unavailable => return llm.LLMError.APIError,
-                else => return llm.LLMError.APIError,
-            }
-        }
-
-        // Simulate successful streaming response
-        for (self.response_chunks) |chunk| {
-            callback(chunk, user_data);
-        }
-    }
-};
-
-/// Test context for accumulating streaming responses
-const TestStreamContext = struct {
-    accumulated_text: std.ArrayList(u8),
-    callback_count: u32 = 0,
-    error_received: bool = false,
-    completion_received: bool = false,
-
-    fn init(allocator: std.mem.Allocator) TestStreamContext {
-        return TestStreamContext{
-            .accumulated_text = std.ArrayList(u8).init(allocator),
-        };
-    }
-
-    fn deinit(self: *TestStreamContext) void {
-        self.accumulated_text.deinit();
-    }
-
-    fn streamCallback(chunk: []const u8, user_data: ?*anyopaque) void {
-        const context: *TestStreamContext = @ptrCast(@alignCast(user_data.?));
-        context.callback_count += 1;
-
-        if (std.mem.startsWith(u8, chunk, "__ERROR__")) {
-            context.error_received = true;
-            return;
-        }
-
-        if (std.mem.eql(u8, chunk, "__COMPLETE__")) {
-            context.completion_received = true;
-            return;
-        }
-
-        context.accumulated_text.appendSlice(chunk) catch {
-            context.error_received = true;
-        };
-    }
-};
+// Use consolidated stream context from test_utils
+const TestStreamContext = test_utils.TestStreamContext;
 
 /// Test-specific OpenAI provider that uses MockHTTPClient
 const TestOpenAIProvider = struct {
