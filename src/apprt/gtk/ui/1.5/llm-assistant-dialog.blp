@@ -18,11 +18,15 @@ Adw.Dialog llm-assistant-dialog {
 
     Box {
       orientation: vertical;
-      spacing: 12;
       margin-top: 12;
       margin-bottom: 12;
       margin-start: 12;
       margin-end: 12;
+
+      Box {
+        orientation: vertical;
+        spacing: 12;
+        vexpand: true;
 
       // Input section
       Box input-box {
@@ -41,6 +45,7 @@ Adw.Dialog llm-assistant-dialog {
         Entry prompt-entry {
           placeholder-text: _("e.g., \"list all files including hidden ones\"");
           hexpand: true;
+          margin-bottom: 12;
 
           styles [
             "card"
@@ -90,7 +95,7 @@ Adw.Dialog llm-assistant-dialog {
         spacing: 6;
         visible: false;
 
-        Label {
+        Label suggestion-title-label {
           label: _("Suggested Command:");
           halign: start;
 
@@ -168,10 +173,18 @@ Adw.Dialog llm-assistant-dialog {
         }
       }
 
-      // Keyboard shortcuts hints
+        // Spacer to push content up (only visible in input state)
+        Box input-spacer {
+          vexpand: true;
+          visible: true;
+        }
+      }
+
+      // Keyboard shortcuts hints - anchored to bottom
       Label shortcuts-hint {
         label: _("↑↓ Navigate history");
         halign: start;
+        margin-bottom: 0;
 
         styles [
           "caption",

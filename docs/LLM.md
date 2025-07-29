@@ -69,6 +69,9 @@ ext-llm-system-prompt = "You are a helpful Linux command assistant..."
 
 # Number of prompts to keep in history (default: 50)
 ext-llm-history-size = 50
+
+# Include terminal context by default (default: true)
+ext-llm-default-terminal-context = true
 ```
 
 ### Multiple Provider Setup

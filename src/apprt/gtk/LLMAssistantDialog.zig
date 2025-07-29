@@ -41,12 +41,14 @@ context_checkbox: *gtk.CheckButton,
 submit_button: *gtk.Button,
 cancel_button: *gtk.Button,
 suggestion_box: *gtk.Box,
+suggestion_title_label: *gtk.Label,
 suggestion_text: *gtk.TextView,
 suggestion_buffer: *gtk.TextBuffer,
 progress_bar: *gtk.ProgressBar,
 error_label: *gtk.Label,
 clear_button: *gtk.Button,
 accept_button: *gtk.Button,
+input_spacer: *gtk.Box,
 shortcuts_hint: *gtk.Label,
 
 // State
@@ -55,6 +57,7 @@ is_loading: bool = false,
 pulse_timer: ?c_uint = null,
 history_manager: HistoryManager,
 current_response: ?[]u8 = null,
+is_showing_error: bool = false,
 
 pub fn init(self: *LLMAssistantDialog, window: *Window) !void {
     var builder = Builder.init("llm-assistant-dialog", 1, 5);
@@ -70,12 +73,14 @@ pub fn init(self: *LLMAssistantDialog, window: *Window) !void {
         .submit_button = builder.getObject(gtk.Button, "submit-button").?,
         .cancel_button = builder.getObject(gtk.Button, "cancel-button").?,
         .suggestion_box = builder.getObject(gtk.Box, "suggestion-box").?,
+        .suggestion_title_label = builder.getObject(gtk.Label, "suggestion-title-label").?,
         .suggestion_text = builder.getObject(gtk.TextView, "suggestion-text").?,
         .suggestion_buffer = undefined, // Will be set below
         .progress_bar = builder.getObject(gtk.ProgressBar, "progress-bar").?,
         .error_label = builder.getObject(gtk.Label, "error-label").?,
         .clear_button = builder.getObject(gtk.Button, "clear-button").?,
         .accept_button = builder.getObject(gtk.Button, "accept-button").?,
+        .input_spacer = builder.getObject(gtk.Box, "input-spacer").?,
         .shortcuts_hint = builder.getObject(gtk.Label, "shortcuts-hint").?,
         .history_manager = HistoryManager.init(window.app.core_app.alloc),
     };
@@ -253,10 +258,12 @@ fn resetDialog(self: *LLMAssistantDialog) void {
 
     // Show input section and hide suggestion section
     gtk.Widget.setVisible(self.input_box.as(gtk.Widget), 1);
+    gtk.Widget.setVisible(self.input_spacer.as(gtk.Widget), 1);
     gtk.Widget.setVisible(self.suggestion_box.as(gtk.Widget), 0);
 
-    // Reset suggestion display
+    // Reset suggestion display and title
     self.suggestion_buffer.setText("", 0);
+    self.suggestion_title_label.setText(@ptrCast(i18n._("Suggested Command:")));
     gtk.Widget.setVisible(self.progress_bar.as(gtk.Widget), 0);
     gtk.Widget.setVisible(self.error_label.as(gtk.Widget), 0);
     gtk.Widget.setVisible(self.clear_button.as(gtk.Widget), 0);
@@ -267,8 +274,9 @@ fn resetDialog(self: *LLMAssistantDialog) void {
     const button_text = std.mem.span(gtk.Editable.getText(self.prompt_entry.as(gtk.Editable)));
     gtk.Widget.setSensitive(self.submit_button.as(gtk.Widget), @intFromBool(button_text.len > 0));
 
-    // Reset loading state
+    // Reset loading and error states
     self.is_loading = false;
+    self.is_showing_error = false;
     if (self.pulse_timer) |timer| {
         _ = glib.Source.remove(timer);
         self.pulse_timer = null;
@@ -450,6 +458,9 @@ fn showResponse(self: *LLMAssistantDialog, command_text: []const u8) void {
     self.stopLoading();
 
     if (command_text.len > 0) {
+        // Mark that we're no longer showing an error
+        self.is_showing_error = false;
+
         // Update current response
         if (self.current_response) |old_response| {
             self.arena.allocator().free(old_response);
@@ -459,10 +470,14 @@ fn showResponse(self: *LLMAssistantDialog, command_text: []const u8) void {
             return;
         };
 
+        // Update title to show success state
+        self.suggestion_title_label.setText(@ptrCast(i18n._("Suggested Command:")));
+
         // Update text buffer
         self.suggestion_buffer.setText(@ptrCast(command_text.ptr), @intCast(command_text.len));
 
-        // Show suggestion UI elements
+        // Hide input spacer and show suggestion UI elements
+        gtk.Widget.setVisible(self.input_spacer.as(gtk.Widget), 0);
         gtk.Widget.setVisible(self.suggestion_box.as(gtk.Widget), 1);
         gtk.Widget.setVisible(self.clear_button.as(gtk.Widget), 1);
         gtk.Widget.setVisible(self.accept_button.as(gtk.Widget), 1);
@@ -482,6 +497,7 @@ fn startLoading(self: *LLMAssistantDialog) void {
 
     // Hide input section and show suggestion area with progress
     gtk.Widget.setVisible(self.input_box.as(gtk.Widget), 0);
+    gtk.Widget.setVisible(self.input_spacer.as(gtk.Widget), 0);
     gtk.Widget.setVisible(self.suggestion_box.as(gtk.Widget), 1);
     gtk.Widget.setVisible(self.progress_bar.as(gtk.Widget), 1);
     gtk.Widget.setVisible(self.error_label.as(gtk.Widget), 0);
@@ -513,13 +529,25 @@ fn cancelRequest(self: *LLMAssistantDialog) void {
 }
 
 fn showError(self: *LLMAssistantDialog, message: []const u8) void {
+    // Mark that we're showing an error
+    self.is_showing_error = true;
+
+    // Hide input spacer and show error in the text area
+    gtk.Widget.setVisible(self.input_spacer.as(gtk.Widget), 0);
     gtk.Widget.setVisible(self.suggestion_box.as(gtk.Widget), 1);
-    self.error_label.setText(@ptrCast(message.ptr));
-    gtk.Widget.setVisible(self.error_label.as(gtk.Widget), 1);
+
+    // Update title to show error state
+    self.suggestion_title_label.setText(@ptrCast(i18n._("An error occurred:")));
+
+    // Clear any existing text and set error message
+    self.suggestion_buffer.setText(@ptrCast(message.ptr), @intCast(message.len));
+
+    // Hide error label and show text area
+    gtk.Widget.setVisible(self.error_label.as(gtk.Widget), 0);
     gtk.Widget.setVisible(self.clear_button.as(gtk.Widget), 1);
     gtk.Widget.setVisible(self.accept_button.as(gtk.Widget), 0);
 
-    // Update shortcuts hint for error state (same as suggestion state)
+    // Update shortcuts hint for error state
     self.updateShortcutsHint();
 }
 
@@ -527,6 +555,11 @@ fn clearSuggestion(self: *LLMAssistantDialog) void {
     // Hide suggestion section and show input section again
     gtk.Widget.setVisible(self.suggestion_box.as(gtk.Widget), 0);
     gtk.Widget.setVisible(self.input_box.as(gtk.Widget), 1);
+    gtk.Widget.setVisible(self.input_spacer.as(gtk.Widget), 1);
+
+    // Reset error state to ensure clean transition
+    self.is_showing_error = false;
+
     self.resetDialog();
 
     // Update shortcuts hint for input state
@@ -585,6 +618,8 @@ fn acceptSuggestion(self: *LLMAssistantDialog) void {
 fn updateShortcutsHint(self: *LLMAssistantDialog) void {
     const hint_text = if (self.is_loading)
         i18n._("Loading...")
+    else if (self.is_showing_error)
+        ""
     else if (gtk.Widget.getVisible(self.suggestion_box.as(gtk.Widget)) != 0)
         i18n._("Ctrl+Enter accept")
     else
