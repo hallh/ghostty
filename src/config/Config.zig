@@ -3135,8 +3135,17 @@ term: []const u8 = "xterm-ghostty",
 
 /// Number of previous prompts to keep in history for navigation with up/down
 /// arrow keys. History is kept in memory only and is cleared when Ghostty
-/// exits.
+/// restarts.
+///
+/// Available since: 1.3.0
 @"ext-llm-history-size": u32 = 50,
+
+/// Default state for including terminal context in LLM prompts. When true,
+/// the terminal history and current line context will be included by default
+/// when making LLM requests. Users can toggle this on/off in the modal dialog.
+///
+/// Available since: 1.3.0
+@"ext-llm-default-terminal-context": bool = true,
 
 /// This is set by the CLI parser for deinit.
 _arena: ?ArenaAllocator = null,

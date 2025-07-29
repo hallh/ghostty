@@ -50,23 +50,36 @@ Adw.Dialog llm-assistant-dialog {
         Box {
           orientation: horizontal;
           spacing: 6;
-          halign: end;
 
-          Button cancel-button {
-            label: _("Cancel");
-
-            styles [
-              "flat"
-            ]
+          CheckButton context-checkbox {
+            label: _("Include terminal context");
+            halign: start;
+            valign: center;
+            active: true;
           }
 
-          Button submit-button {
-            label: _("Get Suggestion");
-            sensitive: false;
+          Box {
+            orientation: horizontal;
+            spacing: 6;
+            halign: end;
+            hexpand: true;
 
-            styles [
-              "suggested-action"
-            ]
+            Button cancel-button {
+              label: _("Cancel");
+
+              styles [
+                "flat"
+              ]
+            }
+
+            Button submit-button {
+              label: _("Get Suggestion");
+              sensitive: false;
+
+              styles [
+                "suggested-action"
+              ]
+            }
           }
         }
       }

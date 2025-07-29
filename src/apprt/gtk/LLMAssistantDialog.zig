@@ -37,6 +37,7 @@ arena: std.heap.ArenaAllocator,
 dialog: *adw.Dialog,
 input_box: *gtk.Box,
 prompt_entry: *gtk.Entry,
+context_checkbox: *gtk.CheckButton,
 submit_button: *gtk.Button,
 cancel_button: *gtk.Button,
 suggestion_box: *gtk.Box,
@@ -65,6 +66,7 @@ pub fn init(self: *LLMAssistantDialog, window: *Window) !void {
         .dialog = builder.getObject(adw.Dialog, "llm-assistant-dialog").?,
         .input_box = builder.getObject(gtk.Box, "input-box").?,
         .prompt_entry = builder.getObject(gtk.Entry, "prompt-entry").?,
+        .context_checkbox = builder.getObject(gtk.CheckButton, "context-checkbox").?,
         .submit_button = builder.getObject(gtk.Button, "submit-button").?,
         .cancel_button = builder.getObject(gtk.Button, "cancel-button").?,
         .suggestion_box = builder.getObject(gtk.Box, "suggestion-box").?,
@@ -80,6 +82,12 @@ pub fn init(self: *LLMAssistantDialog, window: *Window) !void {
 
     // Get the text buffer for the suggestion text view
     self.suggestion_buffer = self.suggestion_text.getBuffer();
+
+    // Set the initial checkbox state from configuration
+    gtk.CheckButton.setActive(
+        self.context_checkbox,
+        @intFromBool(window.app.config.@"ext-llm-default-terminal-context"),
+    );
 
     // Take a reference to keep the dialog in memory
     self.dialog.ref();
@@ -199,6 +207,12 @@ pub fn updateConfig(self: *LLMAssistantDialog) void {
         provider.deinit(self.arena.allocator());
         self.llm_provider = null;
     }
+
+    // Update checkbox state from new configuration
+    gtk.CheckButton.setActive(
+        self.context_checkbox,
+        @intFromBool(self.window.app.config.@"ext-llm-default-terminal-context"),
+    );
 
     // Reinitialize provider with new config
     self.initLLMProvider() catch |err| {
@@ -359,21 +373,28 @@ fn submitRequest(self: *LLMAssistantDialog) void {
     // Start loading state
     self.startLoading();
 
-    // Get terminal context if available
-    const active_surface = self.getActiveSurface();
-    const terminal_context = llm_terminal_context.getTerminalContext(self.arena.allocator(), active_surface) catch |err| blk: {
-        log.warn("Failed to get terminal context: {}", .{err});
-        break :blk null;
-    };
+    // Check if terminal context should be included based on checkbox state
+    const include_context = gtk.CheckButton.getActive(self.context_checkbox) != 0;
 
+    // Get terminal context if available and requested
+    const active_surface = self.getActiveSurface();
+    const terminal_context = if (include_context)
+        llm_terminal_context.getTerminalContext(self.arena.allocator(), active_surface) catch |err| blk: {
+            log.warn("Failed to get terminal context: {}", .{err});
+            break :blk null;
+        }
+    else
+        null;
+
+    log.info("[LLM_DEBUG] Terminal context enabled: {}", .{include_context});
     log.info("[LLM_DEBUG] Terminal context available: {}", .{terminal_context != null});
     if (terminal_context) |ctx| {
         log.info("[LLM_DEBUG] Current input full line: '{any}'", .{ctx.current_input_full_line});
     }
 
-    // Create enhanced prompt with context
-    const enhanced_prompt = if (terminal_context) |ctx|
-        self.createEnhancedPrompt(text, ctx) catch text
+    // Create enhanced prompt with context only if context is enabled and available
+    const enhanced_prompt = if (include_context and terminal_context != null)
+        self.createEnhancedPrompt(text, terminal_context.?) catch text
     else
         text;
     // Don't free enhanced_prompt here - it will be used by the background thread
@@ -382,18 +403,16 @@ fn submitRequest(self: *LLMAssistantDialog) void {
     log.info("[LLM_DEBUG] Enhanced prompt length: {}", .{enhanced_prompt.len});
     log.info("[LLM_DEBUG] Enhanced prompt preview: '{s}'", .{enhanced_prompt});
 
-    // No need to convert terminal context since we're passing it directly to the worker
-
     log.info("[LLM_DEBUG] Enhanced prompt ready with length: {}", .{enhanced_prompt.len});
 
-    // Create worker request with terminal context
+    // Create worker request with terminal context only if enabled
     const worker_request = llm_worker.WorkerRequest{
         .prompt = self.arena.allocator().dupe(u8, enhanced_prompt) catch {
             self.stopLoading();
             self.showError("Memory allocation failed");
             return;
         },
-        .terminal_context = terminal_context,
+        .terminal_context = if (include_context) terminal_context else null,
         .allocator = self.arena.allocator(),
     };
 
