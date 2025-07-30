@@ -30,6 +30,13 @@ const HistoryManager = llm_history.History;
 
 const log = std.log.scoped(.llm_assistant_dialog);
 
+const UIState = enum {
+    input,
+    loading,
+    success,
+    err,
+};
+
 window: *Window,
 arena: std.heap.ArenaAllocator,
 
@@ -53,26 +60,20 @@ shortcuts_hint: *gtk.Label,
 
 // State
 llm_provider: ?llm.LLMProvider = null,
-is_loading: bool = false,
 pulse_timer: ?c_uint = null,
 history_manager: HistoryManager,
 current_response: ?[]u8 = null,
-is_showing_error: bool = false,
+current_state: UIState = .input,
 
-// UI State management
-const UIState = enum {
-    input, // Show input widgets, hide suggestion area
-    loading, // Show progress bar in suggestion area
-    success, // Show suggestion text with accept/clear buttons
-    err, // Show error text with clear button
-};
+fn transitionToState(self: *LLMAssistantDialog, state: UIState) void {
+    self.current_state = state;
 
-fn setUIState(self: *LLMAssistantDialog, state: UIState) void {
     switch (state) {
         .input => {
             gtk.Widget.setVisible(self.input_box.as(gtk.Widget), 1);
             gtk.Widget.setVisible(self.input_spacer.as(gtk.Widget), 1);
             gtk.Widget.setVisible(self.suggestion_box.as(gtk.Widget), 0);
+            self.stopPulseTimer();
         },
         .loading => {
             gtk.Widget.setVisible(self.input_box.as(gtk.Widget), 0);
@@ -82,6 +83,7 @@ fn setUIState(self: *LLMAssistantDialog, state: UIState) void {
             gtk.Widget.setVisible(self.error_label.as(gtk.Widget), 0);
             gtk.Widget.setVisible(self.clear_button.as(gtk.Widget), 0);
             gtk.Widget.setVisible(self.accept_button.as(gtk.Widget), 0);
+            self.pulse_timer = glib.timeoutAdd(100, pulsProgressBar, self);
         },
         .success => {
             gtk.Widget.setVisible(self.input_box.as(gtk.Widget), 0);
@@ -90,6 +92,7 @@ fn setUIState(self: *LLMAssistantDialog, state: UIState) void {
             gtk.Widget.setVisible(self.progress_bar.as(gtk.Widget), 0);
             gtk.Widget.setVisible(self.clear_button.as(gtk.Widget), 1);
             gtk.Widget.setVisible(self.accept_button.as(gtk.Widget), 1);
+            self.stopPulseTimer();
         },
         .err => {
             gtk.Widget.setVisible(self.input_spacer.as(gtk.Widget), 0);
@@ -98,8 +101,11 @@ fn setUIState(self: *LLMAssistantDialog, state: UIState) void {
             gtk.Widget.setVisible(self.error_label.as(gtk.Widget), 0);
             gtk.Widget.setVisible(self.clear_button.as(gtk.Widget), 1);
             gtk.Widget.setVisible(self.accept_button.as(gtk.Widget), 0);
+            self.stopPulseTimer();
         },
     }
+
+    self.updateShortcutsHint();
 }
 
 pub fn init(self: *LLMAssistantDialog, window: *Window) !void {
@@ -214,59 +220,40 @@ pub fn init(self: *LLMAssistantDialog, window: *Window) !void {
 }
 
 pub fn deinit(self: *LLMAssistantDialog) void {
-    // Stop pulse timer if running
-    if (self.pulse_timer) |timer| {
-        _ = glib.Source.remove(timer);
-        self.pulse_timer = null;
-    }
+    self.stopPulseTimer();
 
-    // Clean up LLM provider
     if (self.llm_provider) |provider| {
         provider.deinit(self.arena.allocator());
     }
 
-    // Clean up current response
     if (self.current_response) |response| {
         self.arena.allocator().free(response);
     }
 
-    // Clean up history
     self.history_manager.deinit();
-
     self.arena.deinit();
     self.dialog.unref();
 }
 
 pub fn show(self: *LLMAssistantDialog) void {
-    // Reset state
     self.resetDialog();
-
-    // Show dialog and focus the entry
     self.dialog.present(self.window.window.as(gtk.Widget));
     _ = self.prompt_entry.as(gtk.Widget).grabFocus();
-
-    // Update shortcuts hint for initial state
-    self.updateShortcutsHint();
 }
 
 pub fn updateConfig(self: *LLMAssistantDialog) void {
-    // Clean up existing provider if it exists
     if (self.llm_provider) |provider| {
         provider.deinit(self.arena.allocator());
         self.llm_provider = null;
     }
 
-    // Update checkbox state from new configuration
     gtk.CheckButton.setActive(
         self.context_checkbox,
         @intFromBool(self.window.app.config.@"ext-llm-default-terminal-context"),
     );
 
-    // Reinitialize provider with new config
     self.initLLMProvider() catch |err| {
         log.warn("Failed to reinitialize LLM provider after config update: {}", .{err});
-        // Don't fail the update, just log the error
-        // The dialog will show an appropriate error when the user tries to use it
     };
 }
 
@@ -276,8 +263,6 @@ fn initLLMProvider(self: *LLMAssistantDialog) !void {
         &self.window.app.config,
     ) catch |err| switch (err) {
         llm.LLMError.InvalidConfiguration => {
-            // This is expected when API key is missing or invalid
-            // We'll handle this gracefully when the user tries to make a request
             log.debug("LLM provider not configured: {}", .{err});
             return;
         },
@@ -293,37 +278,20 @@ fn initLLMProvider(self: *LLMAssistantDialog) !void {
 }
 
 fn resetDialog(self: *LLMAssistantDialog) void {
-    // Clear entry if no current text
     const current_text = std.mem.span(gtk.Editable.getText(self.prompt_entry.as(gtk.Editable)));
     if (current_text.len == 0) {
         gtk.Editable.setText(self.prompt_entry.as(gtk.Editable), "");
     }
 
-    // Show input section and hide suggestion section
-    self.setUIState(.input);
+    self.transitionToState(.input);
 
-    // Reset suggestion display and title
     self.suggestion_buffer.setText("", 0);
     self.suggestion_title_label.setText(@ptrCast(i18n._("Suggested Command:")));
-    gtk.Widget.setVisible(self.progress_bar.as(gtk.Widget), 0);
-    gtk.Widget.setVisible(self.error_label.as(gtk.Widget), 0);
-    gtk.Widget.setVisible(self.clear_button.as(gtk.Widget), 0);
-    gtk.Widget.setVisible(self.accept_button.as(gtk.Widget), 0);
 
-    // Reset submit button
     self.submit_button.setLabel(i18n._("Get Suggestion"));
     const button_text = std.mem.span(gtk.Editable.getText(self.prompt_entry.as(gtk.Editable)));
     gtk.Widget.setSensitive(self.submit_button.as(gtk.Widget), @intFromBool(button_text.len > 0));
 
-    // Reset loading and error states
-    self.is_loading = false;
-    self.is_showing_error = false;
-    if (self.pulse_timer) |timer| {
-        _ = glib.Source.remove(timer);
-        self.pulse_timer = null;
-    }
-
-    // Clean up current response
     if (self.current_response) |response| {
         self.arena.allocator().free(response);
         self.current_response = null;
@@ -332,7 +300,8 @@ fn resetDialog(self: *LLMAssistantDialog) void {
 
 fn onPromptChanged(_: *gtk.Editable, self: *LLMAssistantDialog) callconv(.c) void {
     const text = std.mem.span(gtk.Editable.getText(self.prompt_entry.as(gtk.Editable)));
-    gtk.Widget.setSensitive(self.submit_button.as(gtk.Widget), @intFromBool(text.len > 0 and !self.is_loading));
+    const can_submit = text.len > 0 and self.current_state != .loading;
+    gtk.Widget.setSensitive(self.submit_button.as(gtk.Widget), @intFromBool(can_submit));
 }
 
 fn onPromptActivate(_: *gtk.Entry, self: *LLMAssistantDialog) callconv(.c) void {
@@ -351,35 +320,28 @@ fn onKeyPressed(
     switch (keyval) {
         gdk.KEY_Up => {
             self.history_manager.navigate(.previous, self.prompt_entry);
-            return 1; // TRUE - event handled
+            return 1;
         },
         gdk.KEY_Down => {
             self.history_manager.navigate(.next, self.prompt_entry);
-            return 1; // TRUE - event handled
+            return 1;
         },
         gdk.KEY_Return, gdk.KEY_KP_Enter => {
-            // Check for Ctrl+Enter to accept suggestion
-            if (mods.control_mask) {
-                if (gtk.Widget.getVisible(self.suggestion_box.as(gtk.Widget)) != 0 and
-                    gtk.Widget.getVisible(self.accept_button.as(gtk.Widget)) != 0)
-                {
-                    self.acceptSuggestion();
-                    return 1; // TRUE - event handled
-                }
-            }
-            return 0; // FALSE - let normal enter handling proceed
+            if (!mods.control_mask) return 0;
+            if (self.current_state != .success) return 0;
+
+            self.acceptSuggestion();
+            return 1;
         },
         gdk.KEY_Escape => {
-            if (self.is_loading) {
-                self.cancelRequest();
-            } else if (gtk.Widget.getVisible(self.suggestion_box.as(gtk.Widget)) != 0) {
-                self.clearSuggestion();
-            } else {
-                _ = self.dialog.close();
+            switch (self.current_state) {
+                .loading => self.cancelRequest(),
+                .success, .err => self.clearSuggestion(),
+                .input => _ = self.dialog.close(),
             }
-            return 1; // TRUE - event handled
+            return 1;
         },
-        else => return 0, // FALSE - event not handled
+        else => return 0,
     }
 }
 
@@ -403,29 +365,18 @@ fn submitRequest(self: *LLMAssistantDialog) void {
     const text = std.mem.span(gtk.Editable.getText(self.prompt_entry.as(gtk.Editable)));
     if (text.len == 0) return;
 
-    // Check if LLM provider is available
     const provider = self.llm_provider orelse {
-        const config = &self.window.app.config;
-        if (!llm.isConfigured(config)) {
-            self.showError(std.mem.span(llm.getConfigurationError(config)));
-        } else {
-            self.showError(std.mem.span(i18n._("LLM provider failed to initialize. Please check your configuration and try again.")));
-        }
+        self.transitionToErrorWithMessage(self.getProviderErrorMessage());
         return;
     };
 
-    // Add to history
     self.history_manager.addEntry(text) catch |err| {
         log.warn("Failed to add prompt to history: {}", .{err});
     };
 
-    // Start loading state
-    self.startLoading();
+    self.transitionToState(.loading);
 
-    // Check if terminal context should be included based on checkbox state
     const include_context = gtk.CheckButton.getActive(self.context_checkbox) != 0;
-
-    // Get terminal context if available and requested
     const active_surface = self.getActiveSurface();
     const terminal_context = if (include_context)
         llm_terminal_context.getTerminalContext(self.arena.allocator(), active_surface) catch |err| blk: {
@@ -435,28 +386,22 @@ fn submitRequest(self: *LLMAssistantDialog) void {
     else
         null;
 
-    // Create enhanced prompt with context only if context is enabled and available
     const enhanced_prompt = if (include_context and terminal_context != null)
         llm_prompt_builder.createEnhancedPrompt(self.arena.allocator(), text, terminal_context.?) catch text
     else
         text;
-    // Don't free enhanced_prompt here - it will be used by the background thread
 
-    // Create worker request with terminal context only if enabled
     const worker_request = llm_worker.WorkerRequest{
         .prompt = self.arena.allocator().dupe(u8, enhanced_prompt) catch {
-            self.stopLoading();
-            self.showError("Memory allocation failed");
+            self.transitionToErrorWithMessage("Memory allocation failed");
             return;
         },
         .terminal_context = if (include_context) terminal_context else null,
         .allocator = self.arena.allocator(),
     };
 
-    // Log which provider is being queried
     log.debug("Querying LLM provider: {}", .{self.window.app.config.@"ext-llm-provider"});
 
-    // Process request using worker module
     llm_worker.processRequest(
         provider,
         worker_request,
@@ -468,74 +413,43 @@ fn submitRequest(self: *LLMAssistantDialog) void {
 fn onWorkerResponse(response: llm_worker.WorkerResponse, user_data: ?*anyopaque) void {
     const self: *LLMAssistantDialog = @ptrCast(@alignCast(user_data.?));
 
-    if (response.success) {
-        if (response.response) |text| {
-            self.showResponse(text);
-        } else {
-            self.stopLoading();
-            self.showError("Received empty response from LLM");
-        }
-    } else {
-        self.stopLoading();
-        const error_msg = if (response.error_message) |msg| msg else "Unknown error occurred";
-        self.showError(error_msg);
+    if (!response.success) {
+        const error_msg = response.error_message orelse "Unknown error occurred";
+        self.transitionToErrorWithMessage(error_msg);
+        return;
     }
 
-    // Response cleanup is handled by the worker module
+    const text = response.response orelse {
+        self.transitionToErrorWithMessage("Received empty response from LLM");
+        return;
+    };
+
+    self.transitionToSuccessWithResponse(text);
 }
 
-fn showResponse(self: *LLMAssistantDialog, command_text: []const u8) void {
-    self.stopLoading();
-
-    if (command_text.len > 0) {
-        // Mark that we're no longer showing an error
-        self.is_showing_error = false;
-
-        // Update current response
-        if (self.current_response) |old_response| {
-            self.arena.allocator().free(old_response);
-        }
-        self.current_response = self.arena.allocator().dupe(u8, command_text) catch {
-            self.showError("Failed to save response");
-            return;
-        };
-
-        // Update title to show success state
-        self.suggestion_title_label.setText(@ptrCast(i18n._("Suggested Command:")));
-
-        // Update text buffer
-        self.suggestion_buffer.setText(@ptrCast(command_text.ptr), @intCast(command_text.len));
-
-        // Show suggestion UI elements
-        self.setUIState(.success);
-
-        // Focus the input field for keyboard shortcuts to work
-        _ = self.prompt_entry.as(gtk.Widget).grabFocus();
-
-        // Update shortcuts hint for suggestion state
-        self.updateShortcutsHint();
-    } else {
-        self.showError("No command received from LLM service");
+fn transitionToSuccessWithResponse(self: *LLMAssistantDialog, command_text: []const u8) void {
+    if (command_text.len == 0) {
+        self.transitionToErrorWithMessage("No command received from LLM service");
+        return;
     }
+
+    if (self.current_response) |old_response| {
+        self.arena.allocator().free(old_response);
+    }
+
+    self.current_response = self.arena.allocator().dupe(u8, command_text) catch {
+        self.transitionToErrorWithMessage("Failed to save response");
+        return;
+    };
+
+    self.suggestion_title_label.setText(@ptrCast(i18n._("Suggested Command:")));
+    self.suggestion_buffer.setText(@ptrCast(command_text.ptr), @intCast(command_text.len));
+
+    self.transitionToState(.success);
+    _ = self.prompt_entry.as(gtk.Widget).grabFocus();
 }
 
-fn startLoading(self: *LLMAssistantDialog) void {
-    self.is_loading = true;
-    self.setUIState(.loading);
-
-    // Start progress animation
-    self.pulse_timer = glib.timeoutAdd(100, pulsProgressBar, self);
-
-    // Update shortcuts hint for loading state
-    self.updateShortcutsHint();
-}
-
-fn stopLoading(self: *LLMAssistantDialog) void {
-    self.is_loading = false;
-    self.setUIState(.input);
-
-    // Stop progress animation
-    gtk.Widget.setVisible(self.progress_bar.as(gtk.Widget), 0);
+fn stopPulseTimer(self: *LLMAssistantDialog) void {
     if (self.pulse_timer) |timer| {
         _ = glib.Source.remove(timer);
         self.pulse_timer = null;
@@ -543,98 +457,60 @@ fn stopLoading(self: *LLMAssistantDialog) void {
 }
 
 fn cancelRequest(self: *LLMAssistantDialog) void {
-    self.stopLoading();
+    self.transitionToState(.input);
     // Note: We can't actually cancel the HTTP request once started
-    // TODO: Implement request cancellation if needed
 }
 
-fn showError(self: *LLMAssistantDialog, message: []const u8) void {
-    // Mark that we're showing an error
-    self.is_showing_error = true;
-    self.setUIState(.err);
-
-    // Update title to show error state
+fn transitionToErrorWithMessage(self: *LLMAssistantDialog, message: []const u8) void {
     self.suggestion_title_label.setText(@ptrCast(i18n._("An error occurred:")));
-
-    // Clear any existing text and set error message
     self.suggestion_buffer.setText(@ptrCast(message.ptr), @intCast(message.len));
-
-    // Hide error label and show text area
-    gtk.Widget.setVisible(self.error_label.as(gtk.Widget), 0);
-    gtk.Widget.setVisible(self.clear_button.as(gtk.Widget), 1);
-    gtk.Widget.setVisible(self.accept_button.as(gtk.Widget), 0);
-
-    // Update shortcuts hint for error state
-    self.updateShortcutsHint();
+    self.transitionToState(.err);
 }
 
 fn clearSuggestion(self: *LLMAssistantDialog) void {
-    // Hide suggestion section and show input section again
-    self.setUIState(.input);
-
-    // Reset error state to ensure clean transition
-    self.is_showing_error = false;
-
     self.resetDialog();
-
-    // Update shortcuts hint for input state
-    self.updateShortcutsHint();
 }
 
 fn acceptSuggestion(self: *LLMAssistantDialog) void {
-    if (self.current_response) |response| {
-        // Get the current tab/surface and send the command
-        if (self.window.notebook.currentTab()) |tab| {
-            // Convert to null-terminated string for the paste operation
-            const alloc = self.arena.allocator();
-            const command_z = alloc.dupeZ(u8, response) catch {
-                log.err("Failed to allocate memory for command insertion", .{});
-                return;
-            };
-            defer alloc.free(command_z);
+    const response = self.current_response orelse return;
 
-            // Get the active surface from the tab
-            const surface = tab.focus_child orelse switch (tab.elem) {
-                .surface => |s| s,
-                .split => null, // No focused surface, can't determine which one to send to
-            };
+    const tab = self.window.notebook.currentTab() orelse {
+        self.copyToClipboard(response);
+        self.closeAndClearInput();
+        return;
+    };
 
-            if (surface) |s| {
-                // Use the surface's paste mechanism to insert the command
-                s.core_surface.completeClipboardRequest(.paste, command_z, false) catch |err| {
-                    log.err("Failed to insert command into terminal: {}", .{err});
-                    // Fallback: copy to clipboard
-                    const display = gdk.Display.getDefault() orelse return;
-                    const clipboard = gdk.Display.getClipboard(display);
-                    gdk.Clipboard.setText(clipboard, @ptrCast(response.ptr));
-                    return;
-                };
-            } else {
-                log.warn("No active surface found to insert command", .{});
-                // Fallback: copy to clipboard
-                const display = gdk.Display.getDefault() orelse return;
-                const clipboard = gdk.Display.getClipboard(display);
-                gdk.Clipboard.setText(clipboard, @ptrCast(response.ptr));
-            }
-        }
-    }
+    const alloc = self.arena.allocator();
+    const command_z = alloc.dupeZ(u8, response) catch {
+        log.err("Failed to allocate memory for command insertion", .{});
+        return;
+    };
+    defer alloc.free(command_z);
 
-    // Clear the input field so it's empty when dialog reopens
-    // (the previous prompt will be available in history)
-    gtk.Editable.setText(self.prompt_entry.as(gtk.Editable), "");
+    const surface = self.getTabSurface(tab) orelse {
+        log.warn("No active surface found to insert command", .{});
+        self.copyToClipboard(response);
+        self.closeAndClearInput();
+        return;
+    };
 
-    _ = self.dialog.close();
+    surface.core_surface.completeClipboardRequest(.paste, command_z, false) catch |err| {
+        log.err("Failed to insert command into terminal: {}", .{err});
+        self.copyToClipboard(response);
+        self.closeAndClearInput();
+        return;
+    };
+
+    self.closeAndClearInput();
 }
 
 fn updateShortcutsHint(self: *LLMAssistantDialog) void {
-    const hint_text = if (self.is_loading)
-        i18n._("Loading...")
-    else if (self.is_showing_error)
-        ""
-    else if (gtk.Widget.getVisible(self.suggestion_box.as(gtk.Widget)) != 0)
-        i18n._("Ctrl+Enter accept")
-    else
-        i18n._("↑↓ Navigate history");
+    const hint_text = switch (self.current_state) {
+        .loading => i18n._("Loading..."),
+        .err => "",
+        .success => i18n._("Ctrl+Enter accept"),
+        .input => i18n._("↑↓ Navigate history"),
+    };
 
     self.shortcuts_hint.setText(@ptrCast(hint_text));
 }
@@ -648,31 +524,37 @@ fn getActiveSurface(self: *LLMAssistantDialog) ?*Surface {
     };
 }
 
-/// Trim output to first 50 + last 50 characters with ellipsis
-fn trimOutputWithEllipsis(self: *LLMAssistantDialog, output: []const u8) []u8 {
-    const allocator = self.arena.allocator();
-    const max_chars = 50;
-
-    if (output.len <= max_chars * 2) {
-        return allocator.dupe(u8, output) catch &[_]u8{}; // Return empty string on allocation failure
-    }
-
-    // Create trimmed version with ellipsis
-    const trimmed = std.fmt.allocPrint(allocator, "{s} ... {s}", .{
-        output[0..max_chars],
-        output[output.len - max_chars ..],
-    }) catch return allocator.dupe(u8, output) catch &[_]u8{}; // Return empty string on allocation failure
-
-    return trimmed;
-}
-
-fn trimOutput(self: *LLMAssistantDialog, output: []const u8) []const u8 {
-    // Use the new implementation
-    return self.trimOutputWithEllipsis(output);
-}
-
 fn pulsProgressBar(user_data: ?*anyopaque) callconv(.c) c_int {
     const self: *LLMAssistantDialog = @ptrCast(@alignCast(user_data.?));
     self.progress_bar.pulse();
-    return @intFromBool(self.is_loading); // Continue if still loading
+    return @intFromBool(self.current_state == .loading);
+}
+
+fn getProviderErrorMessage(self: *LLMAssistantDialog) []const u8 {
+    const config = &self.window.app.config;
+    return if (!llm.isConfigured(config))
+        std.mem.span(llm.getConfigurationError(config))
+    else
+        std.mem.span(i18n._("LLM provider failed to initialize. Please check your configuration and try again."));
+}
+
+fn getTabSurface(self: *LLMAssistantDialog, tab: anytype) ?*Surface {
+    _ = self;
+    return tab.focus_child orelse switch (tab.elem) {
+        .surface => |s| s,
+        .split => null,
+    };
+}
+
+fn copyToClipboard(self: *LLMAssistantDialog, text: []const u8) void {
+    _ = self;
+    const display = gdk.Display.getDefault() orelse return;
+    const clipboard = gdk.Display.getClipboard(display);
+    gdk.Clipboard.setText(clipboard, @ptrCast(text.ptr));
+}
+
+fn closeAndClearInput(self: *LLMAssistantDialog) void {
+    // Retain previous prompt in history
+    gtk.Editable.setText(self.prompt_entry.as(gtk.Editable), "");
+    _ = self.dialog.close();
 }
