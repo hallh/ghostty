@@ -20,7 +20,7 @@ for cls in root.findall(".//class"):
         hits = int(line.attrib["hits"])
         if hits == 0:
             uncovered.append(number)
-    # Group consecutive uncovered lines
+    # Group consecutive uncovered lines, allowing small gaps for empty lines/comments
     groups = []
     if coverage == 0.0:
         uncovered_str = "*"
@@ -29,7 +29,8 @@ for cls in root.findall(".//class"):
             uncovered.sort()
             start = prev = uncovered[0]
             for n in uncovered[1:]:
-                if n == prev + 1:
+                # Allow gaps of up to 2 lines (for empty lines or single-line comments)
+                if n <= prev + 3:
                     prev = n
                 else:
                     if start == prev:

@@ -39,33 +39,42 @@ pub const History = struct {
         if (self.items.items.len == 0) return;
 
         switch (direction) {
-            .previous => {
-                if (self.index) |index| {
-                    if (index > 0) {
-                        self.index = index - 1;
-                    }
-                } else {
-                    self.index = self.items.items.len - 1;
-                }
-            },
-            .next => {
-                if (self.index) |index| {
-                    if (index < self.items.items.len - 1) {
-                        self.index = index + 1;
-                    } else {
-                        self.index = null;
-                    }
-                }
-            },
+            .previous => self.navigatePrevious(),
+            .next => self.navigateNext(),
         }
 
-        // Update entry text
-        if (self.index) |index| {
-            const text = self.items.items[index];
-            gtk.Editable.setText(entry.as(gtk.Editable), @ptrCast(text.ptr));
-        } else {
-            gtk.Editable.setText(entry.as(gtk.Editable), "");
+        self.updateEntryText(entry);
+    }
+
+    fn navigatePrevious(self: *History) void {
+        const current_index = self.index orelse {
+            self.index = self.items.items.len - 1;
+            return;
+        };
+
+        if (current_index == 0) return;
+        self.index = current_index - 1;
+    }
+
+    fn navigateNext(self: *History) void {
+        const current_index = self.index orelse return;
+
+        if (current_index >= self.items.items.len - 1) {
+            self.index = null;
+            return;
         }
+
+        self.index = current_index + 1;
+    }
+
+    fn updateEntryText(self: *History, entry: *gtk.Entry) void {
+        const index = self.index orelse {
+            gtk.Editable.setText(entry.as(gtk.Editable), "");
+            return;
+        };
+
+        const text = self.items.items[index];
+        gtk.Editable.setText(entry.as(gtk.Editable), @ptrCast(text.ptr));
     }
 };
 

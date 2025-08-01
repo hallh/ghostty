@@ -671,30 +671,3 @@ test "Command text cleaning" {
         try testing.expectEqualStrings(case.expected, response.command);
     }
 }
-
-test "Terminal context integration" {
-    const allocator = std.testing.allocator;
-
-    const context = llm.TerminalContext{
-        .command_history = "ls -l\ngit status",
-    };
-
-    const request = llm.LLMRequest{
-        .prompt = "list all files",
-        .terminal_context = context,
-    };
-
-    // Simulate prompt building
-    const expected_prompt = "Recent command history:\nls -l\ngit status\n\nUser request: list all files";
-
-    var full_prompt = std.ArrayList(u8).init(allocator);
-    defer full_prompt.deinit();
-    const writer = full_prompt.writer();
-
-    if (request.terminal_context.?.command_history) |history| {
-        try writer.print("Recent command history:\n{s}\n\n", .{history});
-    }
-    try writer.print("User request: {s}", .{request.prompt});
-
-    try testing.expectEqualStrings(expected_prompt, full_prompt.items);
-}

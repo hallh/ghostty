@@ -17,13 +17,11 @@ pub fn createEnhancedPrompt(allocator: std.mem.Allocator, user_prompt: []const u
         try prompt_builder.appendSlice(terminal_content);
         try prompt_builder.appendSlice("```\n");
 
-        try prompt_builder.appendSlice("\n## The current state of the active line is the last line. Ignore any decorations that may be present. When returning the suggested CLI command, return only the part of the command that is missing and assume that it will replace the !!CURSOR!! marker.\n\n");
-    } else {
-        try prompt_builder.appendSlice("\n");
+        try prompt_builder.appendSlice("\n## The current state of the active line is the last line. Ignore any decorations that may be present. When returning the suggested CLI command, return only the part of the command that is missing and assume that it will replace the !!CURSOR!! marker.\n");
     }
 
     // Add the user's request
-    try prompt_builder.appendSlice("## They wish to:\n\n");
+    try prompt_builder.appendSlice("\n## They wish to:\n\n");
     try prompt_builder.appendSlice(user_prompt);
     try prompt_builder.appendSlice("\n");
 

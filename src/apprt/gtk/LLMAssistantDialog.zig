@@ -11,6 +11,7 @@ const gtk = @import("gtk");
 const glib = @import("glib");
 
 const llm = @import("../../llm_assistant.zig");
+const configpkg = @import("../../config.zig");
 const i18n = @import("../../os/main.zig").i18n;
 const Builder = @import("Builder.zig");
 const Window = @import("Window.zig");
@@ -241,7 +242,7 @@ pub fn show(self: *LLMAssistantDialog) void {
     _ = self.prompt_entry.as(gtk.Widget).grabFocus();
 }
 
-pub fn updateConfig(self: *LLMAssistantDialog) void {
+pub fn updateConfig(self: *LLMAssistantDialog, config: *const configpkg.Config) !void {
     if (self.llm_provider) |provider| {
         provider.deinit(self.arena.allocator());
         self.llm_provider = null;
@@ -249,12 +250,10 @@ pub fn updateConfig(self: *LLMAssistantDialog) void {
 
     gtk.CheckButton.setActive(
         self.context_checkbox,
-        @intFromBool(self.window.app.config.@"ext-llm-default-terminal-context"),
+        @intFromBool(config.@"ext-llm-default-terminal-context"),
     );
 
-    self.initLLMProvider() catch |err| {
-        log.warn("Failed to reinitialize LLM provider after config update: {}", .{err});
-    };
+    try self.initLLMProvider();
 }
 
 fn initLLMProvider(self: *LLMAssistantDialog) !void {

@@ -59,7 +59,7 @@ if [ "$show_help" = true ]; then
     echo "  $0 --compare-main            # Check changed/added files vs main branch"
     echo "  $0 -m -s                     # Compare vs main, skip tests"
     echo ""
-    exit 0
+    exit 1
 fi
 
 echo "Checking code formatting..."

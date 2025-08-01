@@ -479,7 +479,7 @@ pub fn updateConfig(
     try self.command_palette.updateConfig(config);
 
     // Update LLM assistant dialog config
-    self.llm_assistant_dialog.updateConfig();
+    try self.llm_assistant_dialog.updateConfig(config);
 }
 
 /// Updates appearance based on config settings. Will be called once upon window

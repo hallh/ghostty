@@ -12,10 +12,6 @@ pub const MockLLMProvider = struct {
     error_to_return: ?llm.LLMError = null,
     should_fail_deinit: bool = false,
 
-    // Streaming support
-    stream_chunks: []const []const u8 = &[_][]const u8{},
-    stream_error_after_chunks: ?llm.LLMError = null,
-
     const Self = @This();
 
     pub fn init(allocator: std.mem.Allocator) Self {
@@ -91,21 +87,6 @@ pub const MockScenario = struct {
         };
     }
 
-    pub fn streaming(allocator: std.mem.Allocator, chunks: []const []const u8) MockLLMProvider {
-        return MockLLMProvider{
-            .allocator = allocator,
-            .stream_chunks = chunks,
-        };
-    }
-
-    pub fn streamingWithError(allocator: std.mem.Allocator, chunks: []const []const u8, err: llm.LLMError) MockLLMProvider {
-        return MockLLMProvider{
-            .allocator = allocator,
-            .stream_chunks = chunks,
-            .stream_error_after_chunks = err,
-        };
-    }
-
     pub fn outOfMemory(allocator: std.mem.Allocator) MockLLMProvider {
         return MockLLMProvider{
             .allocator = allocator,
@@ -139,42 +120,6 @@ pub const MockScenario = struct {
             .allocator = allocator,
             .error_to_return = llm.LLMError.RateLimitExceeded,
         };
-    }
-};
-
-/// Test stream context for capturing stream data
-pub const TestStreamContext = struct {
-    allocator: std.mem.Allocator,
-    accumulated_text: std.ArrayList(u8),
-    completion_received: bool = false,
-    error_received: bool = false,
-
-    const Self = @This();
-
-    pub fn init(allocator: std.mem.Allocator) Self {
-        return Self{
-            .allocator = allocator,
-            .accumulated_text = std.ArrayList(u8).init(allocator),
-        };
-    }
-
-    pub fn deinit(self: *Self) void {
-        self.accumulated_text.deinit();
-    }
-
-    pub fn streamCallback(chunk: []const u8, user_data: ?*anyopaque) void {
-        if (user_data) |data| {
-            const context: *TestStreamContext = @ptrCast(@alignCast(data));
-            context.accumulated_text.appendSlice(chunk) catch {
-                context.error_received = true;
-                return;
-            };
-
-            // Simple completion detection - in real scenarios this would parse JSON
-            if (std.mem.indexOf(u8, chunk, "\"finish_reason\"") != null) {
-                context.completion_received = true;
-            }
-        }
     }
 };
 
@@ -213,23 +158,6 @@ pub const MockHTTPClient = struct {
         }
 
         return self.status_code;
-    }
-
-    pub fn postStreamJSON(
-        self: *Self,
-        _: []const u8,
-        _: []const std.http.Header,
-        _: []const u8,
-        callback: anytype, // Generic callback type
-        user_data: ?*anyopaque,
-    ) !void {
-        if (self.error_to_return) |err| {
-            return err;
-        }
-
-        for (self.response_chunks) |chunk| {
-            callback(chunk, user_data);
-        }
     }
 };
 

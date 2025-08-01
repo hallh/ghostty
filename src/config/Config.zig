@@ -417,7 +417,8 @@ pub const compatibility = std.StaticStringMap(
 /// The method to use for calculating the cell width of a grapheme cluster.
 /// The default value is `unicode` which uses the Unicode standard to determine
 /// grapheme width. This results in correct grapheme width but may result in
-/// cursor-desync issues with some programs (such as `wcswidth`).
+/// cursor-desync issues with some programs (such as shells) that may use a
+/// legacy method such as `wcswidth`.
 ///
 /// Valid values are:
 ///
@@ -2256,7 +2257,7 @@ keybind: Keybinds = .{},
 /// (`:`), and then the specified value. The syntax for actions is identical
 /// to the one for keybind actions. Whitespace in between fields is ignored.
 ///
-/// ```
+/// ```ini
 /// command-palette-entry = title:Reset Font Style, action:csi:0m
 /// command-palette-entry = title:Crash on Main Thread,description:Causes a crash on the main (UI) thread.,action:crash:main
 /// ```
@@ -2266,7 +2267,7 @@ keybind: Keybinds = .{},
 /// memorizable shortcuts. The default entries can be cleared by setting this
 /// setting to an empty value:
 ///
-/// ```
+/// ```ini
 /// command-palette-entry =
 /// ```
 ///
@@ -2549,8 +2550,8 @@ keybind: Keybinds = .{},
 /// The "transparent" style will also update in real-time to dynamic
 /// changes to the window background color, e.g. via OSC 11. To make this
 /// more aesthetically pleasing, this only happens if the terminal is
-/// a window, tab, or split that borders the top of the window.
-/// This avoids a disjointed appearance where the titlebar color changes
+/// a window, tab, or split that borders the top of the window. This
+/// avoids a disjointed appearance where the titlebar color changes
 /// but all the topmost terminals don't match.
 ///
 /// The "tabs" style is a completely custom titlebar that integrates the
@@ -3056,7 +3057,7 @@ term: []const u8 = "xterm-ghostty",
 ///
 /// Example: `ext-llm-anthropic-api-key = "sk-ant-..."`
 ///
-/// Available since: 1.3.0
+/// Available since: TODO: add version
 @"ext-llm-anthropic-api-key": ?[]const u8 = null,
 
 /// API key for OpenAI GPT models. Store this securely in your
@@ -3064,7 +3065,7 @@ term: []const u8 = "xterm-ghostty",
 ///
 /// Example: `ext-llm-openai-api-key = "sk-..."`
 ///
-/// Available since: 1.3.0
+/// Available since: TODO: add version
 @"ext-llm-openai-api-key": ?[]const u8 = null,
 
 /// API key for Google Gemini models. Store this securely in your
@@ -3072,7 +3073,7 @@ term: []const u8 = "xterm-ghostty",
 ///
 /// Example: `ext-llm-gemini-api-key = "AIza..."`
 ///
-/// Available since: 1.3.0
+/// Available since: TODO: add version
 @"ext-llm-gemini-api-key": ?[]const u8 = null,
 
 /// LLM provider to use for command suggestions. Supported providers are:
@@ -3084,7 +3085,7 @@ term: []const u8 = "xterm-ghostty",
 /// Each provider may have different API key requirements and model options.
 /// See the provider's documentation for details.
 ///
-/// Available since: 1.3.0
+/// Available since: TODO: add version
 @"ext-llm-provider": LLMProvider = .anthropic,
 
 /// Model to use for Anthropic Claude. Overrides the default Anthropic model.
@@ -3092,7 +3093,7 @@ term: []const u8 = "xterm-ghostty",
 ///
 /// Example: `ext-llm-anthropic-model = "claude-3-7-sonnet-latest"`
 ///
-/// Available since: 1.3.0
+/// Available since: TODO: add version
 @"ext-llm-anthropic-model": ?[]const u8 = null,
 
 /// Model to use for OpenAI GPT. Overrides the default OpenAI model.
@@ -3100,7 +3101,7 @@ term: []const u8 = "xterm-ghostty",
 ///
 /// Example: `ext-llm-openai-model = "gpt-4.1"`
 ///
-/// Available since: 1.3.0
+/// Available since: TODO: add version
 @"ext-llm-openai-model": ?[]const u8 = null,
 
 /// Model to use for Google Gemini. Overrides the default Gemini model.
@@ -3108,7 +3109,7 @@ term: []const u8 = "xterm-ghostty",
 ///
 /// Example: `ext-llm-gemini-model = "gemini-2.5-flash"`
 ///
-/// Available since: 1.3.0
+/// Available since: TODO: add version
 @"ext-llm-gemini-model": ?[]const u8 = null,
 
 /// Temperature for response generation. Lower values make the
@@ -3121,7 +3122,7 @@ term: []const u8 = "xterm-ghostty",
 /// length of the command suggestion. For most command suggestions, 1024
 /// tokens should be more than sufficient.
 ///
-/// Available since: 1.3.0
+/// Available since: TODO: add version
 @"ext-llm-max-tokens": u32 = 4096,
 
 /// Custom system prompt to override the default. The default prompt instructs
@@ -3131,20 +3132,22 @@ term: []const u8 = "xterm-ghostty",
 /// Default: "You are a Linux command assistant. Given a user's description,
 /// provide only the exact command they need. Respond with just the command,
 /// no explanation."
+///
+/// Available since: TODO: add version
 @"ext-llm-system-prompt": ?[]const u8 = null,
 
 /// Number of previous prompts to keep in history for navigation with up/down
 /// arrow keys. History is kept in memory only and is cleared when Ghostty
 /// restarts.
 ///
-/// Available since: 1.3.0
+/// Available since: TODO: add version
 @"ext-llm-history-size": u32 = 50,
 
 /// Default state for including terminal context in LLM prompts. When true,
 /// the terminal history and current line context will be included by default
 /// when making LLM requests. Users can toggle this on/off in the modal dialog.
 ///
-/// Available since: 1.3.0
+/// Available since: TODO: add version
 @"ext-llm-default-terminal-context": bool = true,
 
 /// This is set by the CLI parser for deinit.
