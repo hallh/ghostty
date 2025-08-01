@@ -3088,29 +3088,29 @@ term: []const u8 = "xterm-ghostty",
 /// Available since: TODO: add version
 @"ext-llm-provider": LLMProvider = .anthropic,
 
-/// Model to use for Anthropic Claude. Overrides the default Anthropic model.
+/// Model to use for Anthropic Claude. Defaults to "claude-3-7-sonnet-latest".
 /// Get available models from: https://docs.anthropic.com/en/docs/about-claude/models
 ///
-/// Example: `ext-llm-anthropic-model = "claude-3-7-sonnet-latest"`
+/// Example: `ext-llm-anthropic-model = "claude-3-5-sonnet-latest"`
 ///
 /// Available since: TODO: add version
-@"ext-llm-anthropic-model": ?[]const u8 = null,
+@"ext-llm-anthropic-model": ?[]const u8 = "claude-3-7-sonnet-latest",
 
-/// Model to use for OpenAI GPT. Overrides the default OpenAI model.
+/// Model to use for OpenAI GPT. Defaults to "gpt-4.1".
 /// Get available models from: https://platform.openai.com/docs/models
 ///
-/// Example: `ext-llm-openai-model = "gpt-4.1"`
+/// Example: `ext-llm-openai-model = "gpt-4o-mini"`
 ///
 /// Available since: TODO: add version
-@"ext-llm-openai-model": ?[]const u8 = null,
+@"ext-llm-openai-model": ?[]const u8 = "gpt-4.1",
 
-/// Model to use for Google Gemini. Overrides the default Gemini model.
+/// Model to use for Google Gemini. Defaults to "gemini-2.5-flash".
 /// Get available models from: https://ai.google.dev/gemini-api/docs/models/gemini
 ///
-/// Example: `ext-llm-gemini-model = "gemini-2.5-flash"`
+/// Example: `ext-llm-gemini-model = "gemini-2.5-pro"`
 ///
 /// Available since: TODO: add version
-@"ext-llm-gemini-model": ?[]const u8 = null,
+@"ext-llm-gemini-model": ?[]const u8 = "gemini-2.5-flash",
 
 /// Temperature for response generation. Lower values make the
 /// model more focused and deterministic, higher values make it more creative

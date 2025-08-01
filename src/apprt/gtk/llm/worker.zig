@@ -6,6 +6,7 @@ const llm = @import("../../../llm_assistant.zig");
 const terminal_context = @import("terminal_context.zig");
 const prompt_builder = @import("prompt_builder.zig");
 const TerminalContext = terminal_context.TerminalContext;
+const i18n = @import("../../../os/i18n.zig");
 
 /// NOTE: This worker launches a *one-shot detached thread* for each LLM
 /// request and delivers the result back to the UI thread via a glib
@@ -31,22 +32,67 @@ pub const WorkerRequest = struct {
 };
 
 pub const WorkerResponse = struct {
-    success: bool,
-    response: ?[]u8 = null,
-    error_message: ?[]u8 = null,
+    status: enum { ok, err },
+    text: []u8,
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *WorkerResponse) void {
-        if (self.response) |r| {
-            self.allocator.free(r);
-        }
-        if (self.error_message) |e| {
-            self.allocator.free(e);
-        }
+        self.allocator.free(self.text);
     }
 };
 
 pub const WorkerCallback = *const fn (response: WorkerResponse, user_data: ?*anyopaque) void;
+
+/// Helper function to create a success response
+fn makeSuccess(allocator: std.mem.Allocator, text: []const u8) WorkerResponse {
+    return WorkerResponse{
+        .status = .ok,
+        .text = allocator.dupe(u8, text) catch return makeError(allocator, std.mem.span(i18n._("Failed to allocate memory for response"))),
+        .allocator = allocator,
+    };
+}
+
+/// Helper function to create an error response
+fn makeError(allocator: std.mem.Allocator, text: []const u8) WorkerResponse {
+    return WorkerResponse{
+        .status = .err,
+        .text = allocator.dupe(u8, text) catch @panic("Out of memory creating error response"),
+        .allocator = allocator,
+    };
+}
+
+/// Helper function to get error message from LLM error
+fn getErrorMessage(err: llm.LLMError) []const u8 {
+    const msg_ptr = switch (err) {
+        llm.LLMError.NetworkError => i18n._("Network error. Please check your internet connection."),
+        llm.LLMError.AuthenticationError => i18n._("Authentication failed. Please check your API key."),
+        llm.LLMError.RateLimitExceeded => i18n._("Rate limit exceeded. Please try again later."),
+        llm.LLMError.APIError => i18n._("API error occurred. Please try again."),
+        llm.LLMError.JSONParseError => i18n._("Invalid response from LLM provider."),
+        llm.LLMError.UnsupportedProvider => i18n._("Unsupported LLM provider."),
+        llm.LLMError.InvalidConfiguration => i18n._("LLM provider not configured properly."),
+        llm.LLMError.OutOfMemory => i18n._("Out of memory error."),
+    };
+    return std.mem.span(msg_ptr);
+}
+
+/// Helper function to schedule callback on main thread
+fn scheduleCallback(response: WorkerResponse, callback: WorkerCallback, user_data: ?*anyopaque) void {
+    const callback_data = std.heap.page_allocator.create(WorkerCallbackData) catch {
+        // If we can't allocate callback data, at least clean up the response
+        var mutable_response = response;
+        mutable_response.deinit();
+        return;
+    };
+
+    callback_data.* = WorkerCallbackData{
+        .response = response,
+        .callback = callback,
+        .user_data = user_data,
+    };
+
+    _ = glib.idleAdd(handleWorkerCallback, callback_data);
+}
 
 /// Process an LLM request in a background thread
 pub fn processRequest(
@@ -58,6 +104,15 @@ pub fn processRequest(
     // Create thread data with all needed information
     const thread_data = std.heap.page_allocator.create(ThreadData) catch {
         log.err("Failed to allocate thread data for LLM request", .{});
+
+        // Schedule async error callback instead of falling back to sync
+        const callback_data = std.heap.page_allocator.create(WorkerCallbackData) catch return;
+        callback_data.* = WorkerCallbackData{
+            .response = makeError(std.heap.page_allocator, std.mem.span(i18n._("Failed to allocate thread data for LLM request"))),
+            .callback = callback,
+            .user_data = user_data,
+        };
+        _ = glib.idleAdd(handleWorkerCallback, callback_data);
         return;
     };
 
@@ -73,8 +128,14 @@ pub fn processRequest(
         log.err("Failed to spawn background thread for LLM request: {}", .{err});
         std.heap.page_allocator.destroy(thread_data);
 
-        // Fall back to synchronous processing on main thread as last resort
-        processRequestSync(provider, request, callback, user_data);
+        // Schedule async error callback instead of falling back to sync
+        const callback_data = std.heap.page_allocator.create(WorkerCallbackData) catch return;
+        callback_data.* = WorkerCallbackData{
+            .response = makeError(std.heap.page_allocator, std.mem.span(i18n._("Failed to spawn background thread for LLM request"))),
+            .callback = callback,
+            .user_data = user_data,
+        };
+        _ = glib.idleAdd(handleWorkerCallback, callback_data);
         return;
     };
 
@@ -124,61 +185,47 @@ fn processRequestSync(
 
     // Make the request
     var response = WorkerResponse{
-        .success = false,
+        .status = .ok,
+        .text = std.heap.page_allocator.dupe(u8, "") catch @panic("Out of memory for initial response text"),
         .allocator = std.heap.page_allocator,
     };
 
-    if (provider.request(std.heap.page_allocator, llm_request)) |result| {
-        // Check if LLM response has an error
-        if (result.error_message) |error_msg| {
-            response.success = false;
-            response.error_message = std.heap.page_allocator.dupe(u8, error_msg) catch null;
-        } else {
-            response.success = true;
-            response.response = std.heap.page_allocator.dupe(u8, result.command) catch null;
-            if (response.response == null) {
-                response.success = false;
-                response.error_message = std.heap.page_allocator.dupe(u8, "Failed to allocate memory for response") catch null;
-            }
-        }
+    // Make the request and handle errors with guard clauses
+    const result = provider.request(std.heap.page_allocator, llm_request) catch |err| {
+        const error_str = getErrorMessage(err);
+        std.heap.page_allocator.free(response.text);
+        response.text = std.heap.page_allocator.dupe(u8, error_str) catch @panic("Out of memory for error message");
+        response.status = .err;
 
-        // Clean up the LLM response
-        var mutable_result = result;
-        mutable_result.deinit(std.heap.page_allocator);
-    } else |err| {
-        response.success = false;
-        const error_str = switch (err) {
-            llm.LLMError.NetworkError => "Network error. Please check your internet connection.",
-            llm.LLMError.AuthenticationError => "Authentication failed. Please check your API key.",
-            llm.LLMError.RateLimitExceeded => "Rate limit exceeded. Please try again later.",
-            llm.LLMError.APIError => "API error occurred. Please try again.",
-            llm.LLMError.JSONParseError => "Invalid response from LLM provider.",
-            llm.LLMError.UnsupportedProvider => "Unsupported LLM provider.",
-            llm.LLMError.InvalidConfiguration => "LLM provider not configured properly.",
-            llm.LLMError.OutOfMemory => "Out of memory error.",
-        };
-        response.error_message = std.heap.page_allocator.dupe(u8, error_str) catch null;
-    }
-
-    // Schedule callback on main thread
-    const callback_data = std.heap.page_allocator.create(WorkerCallbackData) catch {
-        // If we can't allocate callback data, at least clean up the response
-        if (response.response) |text| {
-            std.heap.page_allocator.free(text);
-        }
-        if (response.error_message) |msg| {
-            std.heap.page_allocator.free(msg);
-        }
+        // Schedule callback
+        scheduleCallback(response, callback, user_data);
         return;
     };
 
-    callback_data.* = WorkerCallbackData{
-        .response = response,
-        .callback = callback,
-        .user_data = user_data,
-    };
+    // Clean up the LLM response when we're done
+    defer {
+        var mutable_result = result;
+        mutable_result.deinit(std.heap.page_allocator);
+    }
 
-    _ = glib.idleAdd(handleWorkerCallback, callback_data);
+    // Check for API-level errors first
+    if (result.error_message) |error_msg| {
+        std.heap.page_allocator.free(response.text);
+        response.text = std.heap.page_allocator.dupe(u8, error_msg) catch @panic("Out of memory for error message");
+        response.status = .err;
+
+        // Schedule callback
+        scheduleCallback(response, callback, user_data);
+        return;
+    }
+
+    // Success case
+    std.heap.page_allocator.free(response.text);
+    response.text = std.heap.page_allocator.dupe(u8, result.command) catch @panic("Out of memory for response text");
+    response.status = .ok;
+
+    // Schedule callback
+    scheduleCallback(response, callback, user_data);
 }
 
 const WorkerCallbackData = struct {
@@ -195,172 +242,73 @@ fn handleWorkerCallback(data: ?*anyopaque) callconv(.c) c_int {
     return 0; // FALSE - remove from idle
 }
 
-test "WorkerRequest.init and deinit" {
+test "WorkerRequest lifecycle" {
     const testing = std.testing;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const prompt_text = "test prompt";
-    const prompt_copy = try allocator.dupe(u8, prompt_text);
-
-    var request = WorkerRequest{
-        .prompt = prompt_copy,
-        .terminal_context = null,
-        .allocator = allocator,
-    };
-
-    try testing.expectEqualStrings(prompt_text, request.prompt);
-    try testing.expect(request.terminal_context == null);
-
-    request.deinit();
-}
-
-test "WorkerRequest.deinit with terminal context" {
-    const testing = std.testing;
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    const prompt_copy = try allocator.dupe(u8, "test prompt");
-
-    const context = terminal_context.TerminalContext{
-        .current_input_full_line = try allocator.dupe(u8, "test context"),
-        .allocator = allocator,
-    };
-
-    var request = WorkerRequest{
-        .prompt = prompt_copy,
-        .terminal_context = context,
-        .allocator = allocator,
-    };
-
-    try testing.expect(request.terminal_context != null);
-
-    // Should not leak memory
-    request.deinit();
-}
-
-test "WorkerResponse.init and deinit success case" {
-    const testing = std.testing;
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    var response = WorkerResponse{
-        .success = true,
-        .response = try allocator.dupe(u8, "successful response"),
-        .error_message = null,
-        .allocator = allocator,
-    };
-
-    try testing.expect(response.success == true);
-    try testing.expect(response.response != null);
-    try testing.expect(response.error_message == null);
-    try testing.expectEqualStrings("successful response", response.response.?);
-
-    response.deinit();
-}
-
-test "WorkerResponse.init and deinit error case" {
-    const testing = std.testing;
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    var response = WorkerResponse{
-        .success = false,
-        .response = null,
-        .error_message = try allocator.dupe(u8, "error occurred"),
-        .allocator = allocator,
-    };
-
-    try testing.expect(response.success == false);
-    try testing.expect(response.response == null);
-    try testing.expect(response.error_message != null);
-    try testing.expectEqualStrings("error occurred", response.error_message.?);
-
-    response.deinit();
-}
-
-test "WorkerResponse.deinit with both response and error" {
-    const testing = std.testing;
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    var response = WorkerResponse{
-        .success = false,
-        .response = try allocator.dupe(u8, "response text"),
-        .error_message = try allocator.dupe(u8, "error text"),
-        .allocator = allocator,
-    };
-
-    // Should handle freeing both fields
-    response.deinit();
-}
-
-test "WorkerCallback type definition" {
-    const testing = std.testing;
-    // Test that the callback type can be used correctly
-    const TestCallback = WorkerCallback;
-
-    // Define a test callback function
-    const testCallback: TestCallback = struct {
-        fn callback(response: WorkerResponse, user_data: ?*anyopaque) void {
-            _ = response;
-            _ = user_data;
-            // Test callback that does nothing
-        }
-    }.callback;
-
-    // Verify the callback type is correct
-    try testing.expect(@TypeOf(testCallback) == TestCallback);
-}
-
-test "WorkerRequest memory management" {
-    const testing = std.testing;
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    // Test creating and destroying multiple requests
-    for (0..10) |i| {
-        var prompt_buf: [100]u8 = undefined;
-        const prompt_text = try std.fmt.bufPrint(prompt_buf[0..], "test prompt {}", .{i});
+    // Test basic request without terminal context
+    {
+        const prompt_text = "test prompt";
+        const prompt_copy = try allocator.dupe(u8, prompt_text);
 
         var request = WorkerRequest{
-            .prompt = try allocator.dupe(u8, prompt_text),
+            .prompt = prompt_copy,
             .terminal_context = null,
             .allocator = allocator,
         };
 
-        try testing.expect(request.prompt.len > 0);
+        try testing.expectEqualStrings(prompt_text, request.prompt);
+        try testing.expect(request.terminal_context == null);
+        request.deinit();
+    }
 
+    // Test request with terminal context
+    {
+        const prompt_copy = try allocator.dupe(u8, "test prompt");
+        const context = terminal_context.TerminalContext{
+            .current_input_full_line = try allocator.dupe(u8, "test context"),
+            .allocator = allocator,
+        };
+
+        var request = WorkerRequest{
+            .prompt = prompt_copy,
+            .terminal_context = context,
+            .allocator = allocator,
+        };
+
+        try testing.expect(request.terminal_context != null);
         request.deinit();
     }
 }
 
-test "WorkerResponse memory management" {
+test "WorkerResponse lifecycle" {
     const testing = std.testing;
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    // Test creating and destroying multiple responses
-    for (0..10) |i| {
-        var response_buf: [100]u8 = undefined;
-        const response_text = try std.fmt.bufPrint(response_buf[0..], "response {}", .{i});
+    const ResponseStatus = @TypeOf(@as(WorkerResponse, undefined).status);
+    const test_cases = [_]struct {
+        status: ResponseStatus,
+        text: []const u8,
+        description: []const u8,
+    }{
+        .{ .status = .ok, .text = "successful response", .description = "success case" },
+        .{ .status = .err, .text = "error occurred", .description = "error case" },
+    };
 
+    for (test_cases) |case| {
         var response = WorkerResponse{
-            .success = true,
-            .response = try allocator.dupe(u8, response_text),
-            .error_message = null,
+            .status = case.status,
+            .text = try allocator.dupe(u8, case.text),
             .allocator = allocator,
         };
 
-        try testing.expect(response.response.?.len > 0);
-
+        try testing.expect(response.status == case.status);
+        try testing.expect(response.text.len > 0);
+        try testing.expectEqualStrings(case.text, response.text);
         response.deinit();
     }
 }

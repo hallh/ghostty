@@ -412,18 +412,17 @@ fn submitRequest(self: *LLMAssistantDialog) void {
 fn onWorkerResponse(response: llm_worker.WorkerResponse, user_data: ?*anyopaque) void {
     const self: *LLMAssistantDialog = @ptrCast(@alignCast(user_data.?));
 
-    if (!response.success) {
-        const error_msg = response.error_message orelse "Unknown error occurred";
-        self.transitionToErrorWithMessage(error_msg);
+    if (response.status == .err) {
+        self.transitionToErrorWithMessage(response.text);
         return;
     }
 
-    const text = response.response orelse {
+    if (response.text.len == 0) {
         self.transitionToErrorWithMessage("Received empty response from LLM");
         return;
-    };
+    }
 
-    self.transitionToSuccessWithResponse(text);
+    self.transitionToSuccessWithResponse(response.text);
 }
 
 fn transitionToSuccessWithResponse(self: *LLMAssistantDialog, command_text: []const u8) void {

@@ -15,10 +15,8 @@ pub const OpenAIProvider = struct {
     /// Default OpenAI API endpoint
     const API_BASE_URL = "https://api.openai.com/v1";
 
-    /// Provider-specific defaults
-    const DEFAULTS = provider_base.Defaults{
-        .model = "gpt-4.1",
-    };
+    /// Provider-specific defaults (model comes from config)
+    const DEFAULTS = provider_base.Defaults{};
 
     /// OpenAI request structure
     const OpenAIRequest = struct {
@@ -83,11 +81,8 @@ pub const OpenAIProvider = struct {
         const provider = try allocator.create(OpenAIProvider);
         errdefer allocator.destroy(provider);
 
-        // Get provider-specific model or use default
-        const model = cfg.@"ext-llm-openai-model" orelse DEFAULTS.model;
-
         provider.* = OpenAIProvider{
-            .base = try provider_base.BaseProvider.init(allocator, api_key, model, cfg, DEFAULTS),
+            .base = try provider_base.BaseProvider.init(allocator, api_key, .openai, cfg, DEFAULTS),
         };
 
         return provider;
@@ -192,25 +187,37 @@ pub const OpenAIProvider = struct {
         const response = parsed.value;
 
         // Extract command text from the first choice
-        if (response.choices.len > 0) {
-            const choice = response.choices[0];
-            if (choice.message) |message| {
-                if (message.content) |content| {
-                    // Clean up the command text using base provider method
-                    const cleaned_command = try provider_base.BaseProvider.cleanCommandText(allocator, content);
-
-                    return llm.LLMResponse{
-                        .command = cleaned_command,
-                        .is_final = true,
-                    };
-                }
-            }
+        if (response.choices.len == 0) {
+            const error_msg = try allocator.dupe(u8, "No choices in API response");
+            return llm.LLMResponse{
+                .command = "",
+                .error_message = error_msg,
+            };
         }
 
-        const error_msg = try allocator.dupe(u8, "No command text received from API");
+        const choice = response.choices[0];
+        const message = choice.message orelse {
+            const error_msg = try allocator.dupe(u8, "No message in API response");
+            return llm.LLMResponse{
+                .command = "",
+                .error_message = error_msg,
+            };
+        };
+
+        const content = message.content orelse {
+            const error_msg = try allocator.dupe(u8, "No content in API response");
+            return llm.LLMResponse{
+                .command = "",
+                .error_message = error_msg,
+            };
+        };
+
+        // Clean up the command text using base provider method
+        const cleaned_command = try provider_base.BaseProvider.cleanCommandText(allocator, content);
+
         return llm.LLMResponse{
-            .command = "",
-            .error_message = error_msg,
+            .command = cleaned_command,
+            .is_final = true,
         };
     }
 };
@@ -224,52 +231,154 @@ const testing = std.testing;
 // Use consolidated mock from test_utils
 const MockHTTPClient = test_utils.MockHTTPClient;
 
-// Use consolidated stream context from test_utils
-const TestStreamContext = test_utils.TestStreamContext;
+// =====================================================
+// BASIC FUNCTIONALITY TESTS
+// =====================================================
 
-/// Test-specific OpenAI provider that uses MockHTTPClient
-const TestOpenAIProvider = struct {
-    allocator: std.mem.Allocator,
-    api_key: []const u8,
-    model: []const u8,
-    temperature: f32,
-    max_tokens: u32,
-    system_prompt: []const u8,
-    mock_client: MockHTTPClient,
+test "OpenAI basic response parsing" {
+    const allocator = testing.allocator;
+    const configpkg = @import("../config.zig");
+    const cfg = configpkg.Config{};
 
-    const Self = @This();
+    const real_response =
+        \\{
+        \\  "choices": [
+        \\    {
+        \\      "message": {
+        \\        "role": "assistant",
+        \\        "content": "ls -la"
+        \\      }
+        \\    }
+        \\  ]
+        \\}
+    ;
 
-    pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
-        _ = self;
-        _ = allocator;
+    const provider = try OpenAIProvider.init(allocator, "test-key", &cfg);
+    defer provider.deinit(allocator);
+
+    const response = try provider.parseResponse(allocator, real_response, .ok);
+    defer {
+        var mutable_response = response;
+        mutable_response.deinit(allocator);
     }
 
-    /// Test version of requestStream that uses MockHTTPClient
-    pub fn requestStream(
-        _: *Self,
-        _: std.mem.Allocator,
-        _: llm.LLMRequest,
-        _: llm.StreamCallback,
-        _: ?*anyopaque,
-    ) llm.LLMError!void {
-        // Streaming removed for simplicity - use blocking request instead
-        return llm.LLMError.UnsupportedProvider;
-    }
-};
-
-/// Create a test provider with mock HTTP client
-fn createTestProvider(allocator: std.mem.Allocator, mock_client: MockHTTPClient) TestOpenAIProvider {
-    return TestOpenAIProvider{
-        .allocator = allocator,
-        .api_key = "test-api-key",
-        .model = "gpt-4o-mini",
-        .temperature = 0.1,
-        .max_tokens = 1024,
-        .system_prompt = provider_base.DEFAULT_SYSTEM_PROMPT,
-        .mock_client = mock_client,
-    };
+    try testing.expectEqualStrings("ls -la", response.command);
+    try testing.expect(response.is_final);
 }
 
-// =====================================================
-// ERROR HANDLING TESTS (from zig-docs)
-// =====================================================
+test "OpenAI JSON request generation" {
+    const allocator = testing.allocator;
+    const configpkg = @import("../config.zig");
+    const cfg = configpkg.Config{};
+
+    const provider = try OpenAIProvider.init(allocator, "test-key", &cfg);
+    defer provider.deinit(allocator);
+
+    const request = llm.LLMRequest{
+        .prompt = "get the top 3 files by coverage excluding files with 100% coverage",
+        .system_prompt = "You are a helpful assistant",
+    };
+
+    const json = try provider.buildRequestJSON(allocator, request);
+    defer allocator.free(json);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+    defer parsed.deinit();
+
+    const obj = parsed.value.object;
+    try testing.expect(obj.contains("model"));
+    try testing.expect(obj.contains("messages"));
+
+    const messages = obj.get("messages").?.array;
+    const user_message = messages.items[1].object;
+    const user_content = user_message.get("content").?;
+
+    // Critical test: content should be a string, not an array
+    try testing.expect(user_content == .string);
+    try testing.expectEqualStrings("get the top 3 files by coverage excluding files with 100% coverage", user_content.string);
+    try testing.expect(user_content != .array);
+}
+
+test "OpenAI malformed JSON handling" {
+    const allocator = testing.allocator;
+    const configpkg = @import("../config.zig");
+    const cfg = configpkg.Config{};
+
+    const malformed_json = "{ invalid json ]}";
+    const provider = try OpenAIProvider.init(allocator, "test-key", &cfg);
+    defer provider.deinit(allocator);
+
+    const result = provider.parseResponse(allocator, malformed_json, .ok);
+    try testing.expectError(llm.LLMError.JSONParseError, result);
+}
+
+test "OpenAI command text cleaning" {
+    const allocator = testing.allocator;
+    const configpkg = @import("../config.zig");
+    const cfg = configpkg.Config{};
+
+    const test_cases = [_]struct {
+        content: []const u8,
+        expected: []const u8,
+    }{
+        .{ .content = "ls -la", .expected = "ls -la" },
+        .{ .content = "`ls -la`", .expected = "ls -la" },
+        .{ .content = "```bash\\nls -la\\n```", .expected = "ls -la" },
+        .{ .content = "  ls -la  \\n", .expected = "ls -la" },
+    };
+
+    const provider = try OpenAIProvider.init(allocator, "test-key", &cfg);
+    defer provider.deinit(allocator);
+
+    for (test_cases) |case| {
+        const response_json = try std.fmt.allocPrint(allocator,
+            \\{{
+            \\  "choices": [
+            \\    {{
+            \\      "message": {{
+            \\        "role": "assistant",
+            \\        "content": "{s}"
+            \\      }}
+            \\    }}
+            \\  ]
+            \\}}
+        , .{case.content});
+        defer allocator.free(response_json);
+
+        const response = try provider.parseResponse(allocator, response_json, .ok);
+        defer {
+            var mutable_response = response;
+            mutable_response.deinit(allocator);
+        }
+
+        try testing.expectEqualStrings(case.expected, response.command);
+    }
+}
+
+test "OpenAI error response handling" {
+    const allocator = testing.allocator;
+    const configpkg = @import("../config.zig");
+    const cfg = configpkg.Config{};
+
+    const error_response =
+        \\{
+        \\  "error": {
+        \\    "message": "Invalid API key",
+        \\    "type": "invalid_request_error"
+        \\  }
+        \\}
+    ;
+
+    const provider = try OpenAIProvider.init(allocator, "test-key", &cfg);
+    defer provider.deinit(allocator);
+
+    const response = try provider.parseResponse(allocator, error_response, .bad_request);
+    defer {
+        var mutable_response = response;
+        mutable_response.deinit(allocator);
+    }
+
+    try testing.expect(response.error_message != null);
+    try testing.expectEqualStrings("", response.command);
+    try testing.expectEqualStrings("Invalid API key", response.error_message.?);
+}

@@ -16,9 +16,8 @@ pub const DEFAULT_SYSTEM_PROMPT =
     \\Assistant: find . -name "*.pdf" -type f
 ;
 
-/// Provider-specific defaults
+/// Provider-specific defaults (excluding model which comes from config)
 pub const Defaults = struct {
-    model: []const u8,
     temperature: f32 = 0.1,
     max_tokens: u32 = 1024,
     system_prompt: []const u8 = DEFAULT_SYSTEM_PROMPT,
@@ -39,13 +38,22 @@ pub const BaseProvider = struct {
     pub fn init(
         allocator: std.mem.Allocator,
         api_key: []const u8,
-        model: []const u8,
+        provider_type: config.Config.LLMProvider,
         cfg: *const config.Config,
         defaults: Defaults,
     ) !Self {
         // Copy all strings to ensure they remain valid after config reload
         const owned_api_key = try allocator.dupe(u8, api_key);
         errdefer allocator.free(owned_api_key);
+
+        // Get model from config based on provider type
+        const model = switch (provider_type) {
+            .anthropic => cfg.@"ext-llm-anthropic-model",
+            .openai => cfg.@"ext-llm-openai-model",
+            .gemini => cfg.@"ext-llm-gemini-model",
+        } orelse {
+            return llm.LLMError.InvalidConfiguration; // Should not happen with new config defaults
+        };
 
         const owned_model = try allocator.dupe(u8, model);
         errdefer allocator.free(owned_model);
@@ -240,12 +248,10 @@ test "BaseProvider.cleanCommandText preserves valid commands" {
 test "Defaults struct values" {
     const testing = std.testing;
     const defaults = Defaults{
-        .model = "test-model",
         .temperature = 0.5,
         .max_tokens = 2048,
     };
 
-    try testing.expectEqualStrings("test-model", defaults.model);
     try testing.expect(defaults.temperature == 0.5);
     try testing.expect(defaults.max_tokens == 2048);
     try testing.expectEqualStrings(DEFAULT_SYSTEM_PROMPT, defaults.system_prompt);
@@ -294,12 +300,11 @@ test "BaseProvider.init success case" {
     cfg.@"ext-llm-temperature" = 0.5;
     cfg.@"ext-llm-max-tokens" = 2048;
     cfg.@"ext-llm-system-prompt" = "test system prompt";
+    cfg.@"ext-llm-openai-model" = "test-model";
 
-    const defaults = Defaults{
-        .model = "default-model",
-    };
+    const defaults = Defaults{};
 
-    var base = try BaseProvider.init(allocator, "test-api-key", "test-model", &cfg, defaults);
+    var base = try BaseProvider.init(allocator, "test-api-key", .openai, &cfg, defaults);
     defer base.deinit(allocator);
 
     // Verify strings were copied properly
@@ -322,20 +327,20 @@ test "BaseProvider.init with defaults" {
     cfg.@"ext-llm-temperature" = 0.7;
     cfg.@"ext-llm-max-tokens" = 1024;
     cfg.@"ext-llm-system-prompt" = null;
+    // Model comes from config defaults now
 
     const defaults = Defaults{
-        .model = "default-model",
         .temperature = 0.1,
         .max_tokens = 512,
         .system_prompt = "default system prompt",
     };
 
-    var base = try BaseProvider.init(allocator, "test-api-key", "provided-model", &cfg, defaults);
+    var base = try BaseProvider.init(allocator, "test-api-key", .gemini, &cfg, defaults);
     defer base.deinit(allocator);
 
     // Verify defaults were used
     try testing.expectEqualStrings("test-api-key", base.api_key);
-    try testing.expectEqualStrings("provided-model", base.model);
+    try testing.expectEqualStrings("gemini-2.5-flash", base.model); // From config default
     try testing.expectEqualStrings("default system prompt", base.system_prompt);
     try testing.expect(base.temperature == 0.7); // From config
     try testing.expect(base.max_tokens == 1024); // From config
@@ -389,9 +394,7 @@ test "BaseProvider.init handles allocation failures properly" {
     cfg.@"ext-llm-max-tokens" = 2048;
     cfg.@"ext-llm-system-prompt" = "test system prompt";
 
-    const defaults = Defaults{
-        .model = "default-model",
-    };
+    const defaults = Defaults{};
 
     // Test failure after first allocation (api_key duplication fails)
     {
@@ -401,7 +404,7 @@ test "BaseProvider.init handles allocation failures properly" {
         };
         const allocator = failing_allocator.allocator();
 
-        const result = BaseProvider.init(allocator, "test-api-key", "test-model", &cfg, defaults);
+        const result = BaseProvider.init(allocator, "test-api-key", .anthropic, &cfg, defaults);
         try testing.expectError(error.OutOfMemory, result);
     }
 
@@ -413,7 +416,7 @@ test "BaseProvider.init handles allocation failures properly" {
         };
         const allocator = failing_allocator.allocator();
 
-        const result = BaseProvider.init(allocator, "test-api-key", "test-model", &cfg, defaults);
+        const result = BaseProvider.init(allocator, "test-api-key", .anthropic, &cfg, defaults);
         try testing.expectError(error.OutOfMemory, result);
     }
 
@@ -425,7 +428,7 @@ test "BaseProvider.init handles allocation failures properly" {
         };
         const allocator = failing_allocator.allocator();
 
-        const result = BaseProvider.init(allocator, "test-api-key", "test-model", &cfg, defaults);
+        const result = BaseProvider.init(allocator, "test-api-key", .anthropic, &cfg, defaults);
         try testing.expectError(error.OutOfMemory, result);
     }
 }

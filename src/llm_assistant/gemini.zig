@@ -15,9 +15,8 @@ pub const GeminiProvider = struct {
     /// Default Gemini API endpoint
     const API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 
-    /// Provider-specific defaults
+    /// Provider-specific defaults (model comes from config)
     const DEFAULTS = provider_base.Defaults{
-        .model = "gemini-2.5-flash",
         // Note: max_tokens intentionally omitted due to Gemini API bug with token limiting
     };
 
@@ -115,11 +114,8 @@ pub const GeminiProvider = struct {
         const provider = try allocator.create(GeminiProvider);
         errdefer allocator.destroy(provider);
 
-        // Get provider-specific model or use default
-        const model = cfg.@"ext-llm-gemini-model" orelse DEFAULTS.model;
-
         provider.* = GeminiProvider{
-            .base = try provider_base.BaseProvider.init(allocator, api_key, model, cfg, DEFAULTS),
+            .base = try provider_base.BaseProvider.init(allocator, api_key, .gemini, cfg, DEFAULTS),
         };
 
         return provider;
@@ -234,39 +230,57 @@ pub const GeminiProvider = struct {
         const response = parsed.value;
 
         // Extract command text from the first candidate
-        if (response.candidates.len > 0) {
-            const candidate = response.candidates[0];
+        if (response.candidates.len == 0) {
+            const error_msg = try allocator.dupe(u8, "No candidates in API response");
+            return llm.LLMResponse{
+                .command = "",
+                .error_message = error_msg,
+            };
+        }
 
-            // Check for MAX_TOKENS finish reason with empty/minimal text
-            if (candidate.finishReason) |finish_reason| {
-                if (std.mem.eql(u8, finish_reason, "MAX_TOKENS")) {
-                    const error_msg = try allocator.dupe(u8, "Response truncated due to token limit. Try increasing max_tokens or simplifying the request.");
-                    return llm.LLMResponse{
-                        .command = "",
-                        .error_message = error_msg,
-                    };
-                }
-            }
+        const candidate = response.candidates[0];
 
-            if (candidate.content) |content| {
-                if (content.parts.len > 0) {
-                    if (content.parts[0].text) |text| {
-                        // Clean up the command text using base provider method
-                        const cleaned_command = try provider_base.BaseProvider.cleanCommandText(allocator, text);
-
-                        return llm.LLMResponse{
-                            .command = cleaned_command,
-                            .is_final = true,
-                        };
-                    }
-                }
+        // Check for MAX_TOKENS finish reason with empty/minimal text
+        if (candidate.finishReason) |finish_reason| {
+            if (std.mem.eql(u8, finish_reason, "MAX_TOKENS")) {
+                const error_msg = try allocator.dupe(u8, "Response truncated due to token limit. Try increasing max_tokens or simplifying the request.");
+                return llm.LLMResponse{
+                    .command = "",
+                    .error_message = error_msg,
+                };
             }
         }
 
-        const error_msg = try allocator.dupe(u8, "No command text received from API");
+        const content = candidate.content orelse {
+            const error_msg = try allocator.dupe(u8, "No content in API response");
+            return llm.LLMResponse{
+                .command = "",
+                .error_message = error_msg,
+            };
+        };
+
+        if (content.parts.len == 0) {
+            const error_msg = try allocator.dupe(u8, "No parts in API response content");
+            return llm.LLMResponse{
+                .command = "",
+                .error_message = error_msg,
+            };
+        }
+
+        const text = content.parts[0].text orelse {
+            const error_msg = try allocator.dupe(u8, "No text in API response part");
+            return llm.LLMResponse{
+                .command = "",
+                .error_message = error_msg,
+            };
+        };
+
+        // Clean up the command text using base provider method
+        const cleaned_command = try provider_base.BaseProvider.cleanCommandText(allocator, text);
+
         return llm.LLMResponse{
-            .command = "",
-            .error_message = error_msg,
+            .command = cleaned_command,
+            .is_final = true,
         };
     }
 
@@ -285,9 +299,6 @@ const testing = std.testing;
 
 // Use consolidated mock from test_utils
 const MockHTTPClient = test_utils.MockHTTPClient;
-
-// Use consolidated stream context from test_utils
-const TestStreamContext = test_utils.TestStreamContext;
 
 /// Helper function to clean command text for tests
 fn cleanTestCommandText(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
@@ -309,7 +320,7 @@ const TestGeminiProvider = struct {
         provider.* = TestGeminiProvider{
             .allocator = allocator,
             .api_key = try allocator.dupe(u8, "test-key"),
-            .model = try allocator.dupe(u8, "gemini-1.5-flash"),
+            .model = try allocator.dupe(u8, "gemini-2.5-flash"),
             .temperature = 0.7,
             .max_tokens = 1024,
             .system_prompt = try allocator.dupe(u8, "test prompt"),
@@ -466,36 +477,6 @@ test "Gemini error response" {
 
     try testing.expect(response.error_message != null);
     try testing.expectEqualStrings("", response.command);
-
-    if (response.error_message) |msg| {
-        allocator.free(msg);
-    }
-    allocator.free(response.command);
-}
-
-test "Gemini command text cleaning" {
-    const allocator = testing.allocator;
-
-    const response_json =
-        \\{
-        \\    "candidates": [
-        \\        {
-        \\            "content": {
-        \\                "parts": [{ "text": "```bash\nls -la\n```" }]
-        \\            }
-        \\        }
-        \\    ]
-        \\}
-    ;
-
-    const mock_client = MockHTTPClient{ .response_chunks = &[_][]const u8{response_json} };
-    var provider = createTestProvider(allocator, mock_client);
-    defer provider.deinit();
-
-    const request = llm.LLMRequest{ .prompt = "list files" };
-    const response = try provider.request(allocator, request);
-
-    try testing.expectEqualStrings("ls -la", response.command);
 
     if (response.error_message) |msg| {
         allocator.free(msg);

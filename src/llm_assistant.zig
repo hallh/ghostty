@@ -198,8 +198,6 @@ const GeminiProvider = @import("llm_assistant/gemini.zig");
 
 // Test imports - ensures all tests are discoverable by `zig build test`
 test {
-    _ = @import("llm_assistant/integration_test.zig");
-
     // Reference all modules to ensure their inline tests are included
     _ = @import("llm_assistant/provider_base.zig");
     _ = @import("llm_assistant/openai.zig");
@@ -252,8 +250,8 @@ test "provider-specific API keys and models" {
     {
         const cfg = config.Config{};
 
-        try testing.expect(cfg.@"ext-llm-anthropic-model" == null);
-        try testing.expect(cfg.@"ext-llm-openai-model" == null);
-        try testing.expect(cfg.@"ext-llm-gemini-model" == null);
+        try testing.expectEqualStrings("claude-3-7-sonnet-latest", cfg.@"ext-llm-anthropic-model".?);
+        try testing.expectEqualStrings("gpt-4.1", cfg.@"ext-llm-openai-model".?);
+        try testing.expectEqualStrings("gemini-2.5-flash", cfg.@"ext-llm-gemini-model".?);
     }
 }

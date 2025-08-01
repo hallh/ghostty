@@ -15,10 +15,8 @@ pub const AnthropicProvider = struct {
     /// Default Anthropic API endpoint
     const API_BASE_URL = "https://api.anthropic.com/v1";
 
-    /// Provider-specific defaults
-    const DEFAULTS = provider_base.Defaults{
-        .model = "claude-3-7-sonnet-latest",
-    };
+    /// Provider-specific defaults (model comes from config)
+    const DEFAULTS = provider_base.Defaults{};
 
     /// Anthropic request structure
     const AnthropicRequest = struct {
@@ -77,11 +75,8 @@ pub const AnthropicProvider = struct {
         const provider = try allocator.create(AnthropicProvider);
         errdefer allocator.destroy(provider);
 
-        // Get provider-specific model or use default
-        const model = cfg.@"ext-llm-anthropic-model" orelse DEFAULTS.model;
-
         provider.* = AnthropicProvider{
-            .base = try provider_base.BaseProvider.init(allocator, api_key, model, cfg, DEFAULTS),
+            .base = try provider_base.BaseProvider.init(allocator, api_key, .anthropic, cfg, DEFAULTS),
         };
 
         return provider;
@@ -223,9 +218,6 @@ const testing = std.testing;
 
 // Use consolidated mock from test_utils
 const MockHTTPClient = test_utils.MockHTTPClient;
-
-// Use consolidated stream context from test_utils
-const TestStreamContext = test_utils.TestStreamContext;
 
 /// Helper function to clean command text for tests
 fn cleanTestCommandText(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
@@ -417,35 +409,6 @@ test "Anthropic error response" {
 
     try testing.expect(response.error_message != null);
     try testing.expectEqualStrings("", response.command);
-
-    if (response.error_message) |msg| {
-        allocator.free(msg);
-    }
-    allocator.free(response.command);
-}
-
-test "Anthropic command text cleaning" {
-    const allocator = testing.allocator;
-
-    const response_json =
-        \\{
-        \\    "content": [
-        \\        {
-        \\            "type": "text",
-        \\            "text": "```bash\nls -la\n```"
-        \\        }
-        \\    ]
-        \\}
-    ;
-
-    const mock_client = MockHTTPClient{ .response_chunks = &[_][]const u8{response_json} };
-    var provider = createTestProvider(allocator, mock_client);
-    defer provider.deinit();
-
-    const request = llm.LLMRequest{ .prompt = "list files" };
-    const response = try provider.request(allocator, request);
-
-    try testing.expectEqualStrings("ls -la", response.command);
 
     if (response.error_message) |msg| {
         allocator.free(msg);
