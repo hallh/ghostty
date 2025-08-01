@@ -22,12 +22,13 @@ const PageList = terminal.PageList;
 const Pin = terminal.Pin;
 
 // LLM helper modules
-const llm_terminal_context = @import("llm/terminal_context.zig");
-const llm_prompt_builder = @import("llm/prompt_builder.zig");
-const llm_history = @import("llm/history.zig");
-const llm_worker = @import("llm/worker.zig");
-const LLMTerminalContext = llm_terminal_context.TerminalContext;
-const HistoryManager = llm_history.History;
+const llm_terminal_context_gtk = @import("llm/terminal_context_gtk.zig");
+const llm_prompt_builder = @import("../../llm_assistant/prompt_builder.zig");
+const llm_history_gtk = @import("llm/history_gtk.zig");
+const llm_worker = @import("llm/worker_glib.zig");
+const terminal_context_mod = @import("../../llm_assistant/terminal_context.zig");
+const LLMTerminalContext = terminal_context_mod.TerminalContext;
+const HistoryManager = llm_history_gtk.HistoryGTK;
 
 const log = std.log.scoped(.llm_assistant_dialog);
 
@@ -378,7 +379,7 @@ fn submitRequest(self: *LLMAssistantDialog) void {
     const include_context = gtk.CheckButton.getActive(self.context_checkbox) != 0;
     const active_surface = self.getActiveSurface();
     const terminal_context = if (include_context)
-        llm_terminal_context.getTerminalContext(self.arena.allocator(), active_surface) catch |err| blk: {
+        llm_terminal_context_gtk.getTerminalContext(self.arena.allocator(), active_surface) catch |err| blk: {
             log.warn("Failed to get terminal context: {}", .{err});
             break :blk null;
         }

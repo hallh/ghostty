@@ -1,23 +1,26 @@
 const std = @import("std");
-const log = std.log.scoped(.llm_worker);
-const glib = @import("glib");
+const log = std.log.scoped(.llm_worker_core);
 
-const llm = @import("../../../llm_assistant.zig");
+const llm = @import("../llm_assistant.zig");
 const terminal_context = @import("terminal_context.zig");
 const prompt_builder = @import("prompt_builder.zig");
 const TerminalContext = terminal_context.TerminalContext;
-const i18n = @import("../../../os/i18n.zig");
+const i18n = @import("../os/i18n.zig");
 
-/// NOTE: This worker launches a *one-shot detached thread* for each LLM
-/// request and delivers the result back to the UI thread via a glib
-/// idle callback.  Other async subsystems in Ghostty (renderer, IO, CF
-/// release, etc.) use a long-lived thread + `BlockingQueue` mailbox
-/// because they process a continuous stream of messages.  For the LLM
-/// assistant the workload is bursty (user presses Ctrl+Shift+K, one
-/// request), so spinning up a throw-away thread avoids keeping an idle
-/// thread and queue alive.  If we ever introduce streaming responses or
-/// high-frequency requests, migrating to the mailbox model or a thread
-/// pool would be appropriate.
+/// Cross-platform callback scheduler interface
+pub const CallbackScheduler = struct {
+    ptr: *anyopaque,
+    vtable: *const Vtable,
+
+    pub const Vtable = struct {
+        schedule: *const fn (ptr: *anyopaque, callback: WorkerCallback, response: WorkerResponse, user_data: ?*anyopaque) void,
+    };
+
+    pub fn schedule(self: CallbackScheduler, callback: WorkerCallback, response: WorkerResponse, user_data: ?*anyopaque) void {
+        self.vtable.schedule(self.ptr, callback, response, user_data);
+    }
+};
+
 pub const WorkerRequest = struct {
     prompt: []const u8,
     terminal_context: ?TerminalContext = null,
@@ -76,28 +79,11 @@ fn getErrorMessage(err: llm.LLMError) []const u8 {
     return std.mem.span(msg_ptr);
 }
 
-/// Helper function to schedule callback on main thread
-fn scheduleCallback(response: WorkerResponse, callback: WorkerCallback, user_data: ?*anyopaque) void {
-    const callback_data = std.heap.page_allocator.create(WorkerCallbackData) catch {
-        // If we can't allocate callback data, at least clean up the response
-        var mutable_response = response;
-        mutable_response.deinit();
-        return;
-    };
-
-    callback_data.* = WorkerCallbackData{
-        .response = response,
-        .callback = callback,
-        .user_data = user_data,
-    };
-
-    _ = glib.idleAdd(handleWorkerCallback, callback_data);
-}
-
 /// Process an LLM request in a background thread
 pub fn processRequest(
     provider: llm.LLMProvider,
     request: WorkerRequest,
+    scheduler: CallbackScheduler,
     callback: WorkerCallback,
     user_data: ?*anyopaque,
 ) void {
@@ -105,20 +91,16 @@ pub fn processRequest(
     const thread_data = std.heap.page_allocator.create(ThreadData) catch {
         log.err("Failed to allocate thread data for LLM request", .{});
 
-        // Schedule async error callback instead of falling back to sync
-        const callback_data = std.heap.page_allocator.create(WorkerCallbackData) catch return;
-        callback_data.* = WorkerCallbackData{
-            .response = makeError(std.heap.page_allocator, std.mem.span(i18n._("Failed to allocate thread data for LLM request"))),
-            .callback = callback,
-            .user_data = user_data,
-        };
-        _ = glib.idleAdd(handleWorkerCallback, callback_data);
+        // Schedule async error callback
+        const error_response = makeError(std.heap.page_allocator, std.mem.span(i18n._("Failed to allocate thread data for LLM request")));
+        scheduler.schedule(callback, error_response, user_data);
         return;
     };
 
     thread_data.* = ThreadData{
         .provider = provider,
         .request = request,
+        .scheduler = scheduler,
         .callback = callback,
         .user_data = user_data,
     };
@@ -128,14 +110,9 @@ pub fn processRequest(
         log.err("Failed to spawn background thread for LLM request: {}", .{err});
         std.heap.page_allocator.destroy(thread_data);
 
-        // Schedule async error callback instead of falling back to sync
-        const callback_data = std.heap.page_allocator.create(WorkerCallbackData) catch return;
-        callback_data.* = WorkerCallbackData{
-            .response = makeError(std.heap.page_allocator, std.mem.span(i18n._("Failed to spawn background thread for LLM request"))),
-            .callback = callback,
-            .user_data = user_data,
-        };
-        _ = glib.idleAdd(handleWorkerCallback, callback_data);
+        // Schedule async error callback
+        const error_response = makeError(std.heap.page_allocator, std.mem.span(i18n._("Failed to spawn background thread for LLM request")));
+        scheduler.schedule(callback, error_response, user_data);
         return;
     };
 
@@ -146,6 +123,7 @@ pub fn processRequest(
 const ThreadData = struct {
     provider: llm.LLMProvider,
     request: WorkerRequest,
+    scheduler: CallbackScheduler,
     callback: WorkerCallback,
     user_data: ?*anyopaque,
 };
@@ -157,6 +135,7 @@ fn processRequestBackground(thread_data: *ThreadData) void {
     processRequestSync(
         thread_data.provider,
         thread_data.request,
+        thread_data.scheduler,
         thread_data.callback,
         thread_data.user_data,
     );
@@ -166,6 +145,7 @@ fn processRequestBackground(thread_data: *ThreadData) void {
 fn processRequestSync(
     provider: llm.LLMProvider,
     request: WorkerRequest,
+    scheduler: CallbackScheduler,
     callback: WorkerCallback,
     user_data: ?*anyopaque,
 ) void {
@@ -198,7 +178,7 @@ fn processRequestSync(
         response.status = .err;
 
         // Schedule callback
-        scheduleCallback(response, callback, user_data);
+        scheduler.schedule(callback, response, user_data);
         return;
     };
 
@@ -215,7 +195,7 @@ fn processRequestSync(
         response.status = .err;
 
         // Schedule callback
-        scheduleCallback(response, callback, user_data);
+        scheduler.schedule(callback, response, user_data);
         return;
     }
 
@@ -225,21 +205,7 @@ fn processRequestSync(
     response.status = .ok;
 
     // Schedule callback
-    scheduleCallback(response, callback, user_data);
-}
-
-const WorkerCallbackData = struct {
-    callback: WorkerCallback,
-    response: WorkerResponse,
-    user_data: ?*anyopaque,
-};
-
-fn handleWorkerCallback(data: ?*anyopaque) callconv(.c) c_int {
-    const callback_data: *WorkerCallbackData = @ptrCast(@alignCast(data.?));
-    defer std.heap.page_allocator.destroy(callback_data);
-
-    callback_data.callback(callback_data.response, callback_data.user_data);
-    return 0; // FALSE - remove from idle
+    scheduler.schedule(callback, response, user_data);
 }
 
 test "WorkerRequest lifecycle" {
@@ -310,5 +276,52 @@ test "WorkerResponse lifecycle" {
         try testing.expect(response.text.len > 0);
         try testing.expectEqualStrings(case.text, response.text);
         response.deinit();
+    }
+}
+
+test "getErrorMessage covers all error types" {
+    const testing = std.testing;
+
+    const error_cases = [_]llm.LLMError{
+        llm.LLMError.NetworkError,
+        llm.LLMError.AuthenticationError,
+        llm.LLMError.RateLimitExceeded,
+        llm.LLMError.APIError,
+        llm.LLMError.JSONParseError,
+        llm.LLMError.UnsupportedProvider,
+        llm.LLMError.InvalidConfiguration,
+        llm.LLMError.OutOfMemory,
+    };
+
+    for (error_cases) |err| {
+        const message = getErrorMessage(err);
+        try testing.expect(message.len > 0);
+    }
+}
+
+test "makeSuccess and makeError" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Test success response
+    {
+        const success_text = "Command executed successfully";
+        var success_response = makeSuccess(allocator, success_text);
+        defer success_response.deinit();
+
+        try testing.expectEqual(@as(@TypeOf(success_response.status), .ok), success_response.status);
+        try testing.expectEqualStrings(success_text, success_response.text);
+    }
+
+    // Test error response
+    {
+        const error_text = "An error occurred";
+        var error_response = makeError(allocator, error_text);
+        defer error_response.deinit();
+
+        try testing.expectEqual(@as(@TypeOf(error_response.status), .err), error_response.status);
+        try testing.expectEqualStrings(error_text, error_response.text);
     }
 }

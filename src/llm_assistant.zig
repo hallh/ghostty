@@ -255,3 +255,11 @@ test "provider-specific API keys and models" {
         try testing.expectEqualStrings("gemini-2.5-flash", cfg.@"ext-llm-gemini-model".?);
     }
 }
+
+// Import helper modules for test discovery
+test {
+    _ = @import("llm_assistant/history.zig");
+    _ = @import("llm_assistant/prompt_builder.zig");
+    _ = @import("llm_assistant/terminal_context.zig");
+    _ = @import("llm_assistant/worker_core.zig");
+}

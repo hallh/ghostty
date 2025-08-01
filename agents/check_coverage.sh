@@ -43,7 +43,7 @@ done
 if [ "$show_help" = true ]; then
     echo "Usage: $0 [OPTIONS]"
     echo ""
-    echo "Run coverage tests and analyze coverage gaps in changed files."
+    echo "Run coverage tests and analyze coverage gaps in changed and new files."
     echo ""
     echo "Options:"
     echo "  -s, --skip-tests       Skip running tests, use existing coverage data"
@@ -52,7 +52,7 @@ if [ "$show_help" = true ]; then
     echo "  -h, --help             Show this help message"
     echo ""
     echo "Examples:"
-    echo "  $0                           # Run all tests with coverage"
+    echo "  $0                           # Check modified and new files (default)"
     echo "  $0 --skip-tests              # Skip tests, analyze existing coverage"
     echo "  $0 --filter \"terminal\"       # Run only tests matching 'terminal'"
     echo "  $0 -f config --skip-tests    # Skip tests, but show filter would be 'config'"
@@ -169,7 +169,7 @@ echo ""
 if [ "$compare_main" = true ]; then
     echo "Analyzing coverage gaps in files changed vs main branch..."
 else
-    echo "Analyzing coverage gaps in changed files..."
+    echo "Analyzing coverage gaps in modified and new files..."
 fi
 echo "=========================================="
 
@@ -368,8 +368,14 @@ if [ "$compare_main" = true ]; then
     modified_files=$(printf "%s\n%s\n%s\n%s\n" "$committed_files" "$staged_files" "$unstaged_files" "$untracked_files" | grep -v '^$' | sort -u || true)
     files_description="changed/added source files vs main branch"
 else
-    modified_files=$(git diff --name-only --diff-filter=M | grep -E '\.(zig|c|cpp|h)$' | grep '^src/' || true)
-    files_description="modified source files"
+    # Get modified files (staged + unstaged) and new untracked files
+    staged_modified_files=$(git diff --name-only --cached | grep -E '\.(zig|c|cpp|h)$' | grep '^src/' || true)
+    unstaged_modified_files=$(git diff --name-only | grep -E '\.(zig|c|cpp|h)$' | grep '^src/' || true)
+    untracked_files=$(git ls-files --others --exclude-standard | grep -E '\.(zig|c|cpp|h)$' | grep '^src/' || true)
+    
+    # Combine all file lists and remove duplicates
+    modified_files=$(printf "%s\n%s\n%s\n" "$staged_modified_files" "$unstaged_modified_files" "$untracked_files" | grep -v '^$' | sort -u || true)
+    files_description="modified and new source files"
 fi
 
 if [ -z "$modified_files" ]; then

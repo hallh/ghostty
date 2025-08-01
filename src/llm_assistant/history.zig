@@ -1,5 +1,6 @@
 const std = @import("std");
-const gtk = @import("gtk");
+
+pub const Direction = enum { previous, next };
 
 pub const History = struct {
     items: std.ArrayList([:0]u8),
@@ -21,7 +22,7 @@ pub const History = struct {
 
     /// Add a text entry to history
     pub fn addEntry(self: *History, text: []const u8) !void {
-        // Add to history (null-terminated for GTK compatibility)
+        // Add to history (null-terminated for compatibility)
         const owned_text = try self.items.allocator.dupeZ(u8, text);
         try self.items.append(owned_text);
 
@@ -34,16 +35,28 @@ pub const History = struct {
         self.index = null;
     }
 
-    /// Navigate through history and update the provided entry widget
-    pub fn navigate(self: *History, direction: enum { previous, next }, entry: *gtk.Entry) void {
-        if (self.items.items.len == 0) return;
+    /// Navigate through history and return the text (platform-agnostic)
+    pub fn navigate(self: *History, direction: Direction) ?[]const u8 {
+        if (self.items.items.len == 0) return null;
 
         switch (direction) {
             .previous => self.navigatePrevious(),
             .next => self.navigateNext(),
         }
 
-        self.updateEntryText(entry);
+        return self.getCurrentText();
+    }
+
+    /// Get the current text at the history index
+    pub fn getCurrentText(self: *History) ?[]const u8 {
+        const index = self.index orelse return null;
+        if (index >= self.items.items.len) return null;
+        return self.items.items[index];
+    }
+
+    /// Clear the current history navigation (return to "current" state)
+    pub fn clearNavigation(self: *History) void {
+        self.index = null;
     }
 
     fn navigatePrevious(self: *History) void {
@@ -65,16 +78,6 @@ pub const History = struct {
         }
 
         self.index = current_index + 1;
-    }
-
-    fn updateEntryText(self: *History, entry: *gtk.Entry) void {
-        const index = self.index orelse {
-            gtk.Editable.setText(entry.as(gtk.Editable), "");
-            return;
-        };
-
-        const text = self.items.items[index];
-        gtk.Editable.setText(entry.as(gtk.Editable), @ptrCast(text.ptr));
     }
 };
 
@@ -145,11 +148,9 @@ test "History.navigate with empty history does nothing" {
     var hist = History.init(allocator);
     defer hist.deinit();
 
-    // Create a mock GTK entry for testing
-    // Note: This is a simplified test since we can't easily mock GTK widgets
-    // In practice, this would be tested via integration tests
-
-    // The navigate function should handle empty history gracefully
+    // Navigate on empty history should return null
+    const result = hist.navigate(.previous);
+    try testing.expect(result == null);
     try testing.expect(hist.index == null);
 }
 
@@ -167,31 +168,65 @@ test "History.navigate previous and next logic" {
     try hist.addEntry("second");
     try hist.addEntry("third");
 
-    // Test navigation logic (without GTK dependency)
     // Navigate to previous (should go to last item)
-    hist.index = hist.items.items.len - 1; // Simulate first previous navigation
+    const prev1 = hist.navigate(.previous);
+    try testing.expect(prev1 != null);
+    try testing.expectEqualStrings("third", prev1.?);
     try testing.expect(hist.index.? == 2);
 
     // Navigate previous again
-    if (hist.index.? > 0) {
-        hist.index = hist.index.? - 1;
-    }
+    const prev2 = hist.navigate(.previous);
+    try testing.expect(prev2 != null);
+    try testing.expectEqualStrings("second", prev2.?);
     try testing.expect(hist.index.? == 1);
 
     // Navigate to next
-    if (hist.index.? < hist.items.items.len - 1) {
-        hist.index = hist.index.? + 1;
-    } else {
-        hist.index = null;
-    }
+    const next1 = hist.navigate(.next);
+    try testing.expect(next1 != null);
+    try testing.expectEqualStrings("third", next1.?);
     try testing.expect(hist.index.? == 2);
 
     // Navigate next again (should reset to null)
-    if (hist.index.? < hist.items.items.len - 1) {
-        hist.index = hist.index.? + 1;
-    } else {
-        hist.index = null;
-    }
+    const next2 = hist.navigate(.next);
+    try testing.expect(next2 == null);
+    try testing.expect(hist.index == null);
+}
+
+test "History.getCurrentText" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var hist = History.init(allocator);
+    defer hist.deinit();
+
+    try hist.addEntry("test entry");
+
+    // No navigation yet, should return null
+    try testing.expect(hist.getCurrentText() == null);
+
+    // Navigate and then get current text
+    _ = hist.navigate(.previous);
+    const current = hist.getCurrentText();
+    try testing.expect(current != null);
+    try testing.expectEqualStrings("test entry", current.?);
+}
+
+test "History.clearNavigation" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var hist = History.init(allocator);
+    defer hist.deinit();
+
+    try hist.addEntry("test");
+    _ = hist.navigate(.previous);
+    try testing.expect(hist.index != null);
+
+    hist.clearNavigation();
     try testing.expect(hist.index == null);
 }
 

@@ -2144,5 +2144,67 @@ pub const CAPI = struct {
                 ptr.backend = null;
             }
         }
+
+        /// Get terminal context for LLM assistant from a surface.
+        /// The returned string must be freed by the caller using ghostty_string_free.
+        export fn ghostty_surface_llm_terminal_context(
+            ptr: *Surface,
+            out_context: *?[*:0]u8,
+        ) void {
+            out_context.* = null; // Default to null, early return pattern
+
+            const embedded_terminal_context = @import("embedded/llm/terminal_context_embedded.zig");
+
+            // Get terminal context using the cross-platform implementation
+            var context = embedded_terminal_context.getTerminalContext(
+                ptr.app.core_app.alloc,
+                ptr,
+            ) catch |err| {
+                log.err("error getting terminal context err={}", .{err});
+                return;
+            };
+            defer if (context) |*c| c.deinit();
+
+            // Guard clause: early return if no context
+            const c = context orelse return;
+
+            // Guard clause: early return if no content
+            const content = c.current_input_full_line orelse return;
+
+            // Duplicate the content as a null-terminated string
+            const result = ptr.app.core_app.alloc.dupeZ(u8, content) catch |err| {
+                log.err("error duplicating terminal context err={}", .{err});
+                return;
+            };
+            out_context.* = result.ptr;
+        }
+
+        /// Free a string allocated by libghostty.
+        export fn ghostty_string_free(str: [*:0]u8) void {
+            // We need to get the allocator somewhere. For now, we'll use the global state.
+            // This is a limitation of the current C API design.
+            const global_state = &@import("../global.zig").state;
+
+            // Guard clause: early return if no allocator available
+            const gpa = global_state.gpa orelse return;
+
+            const slice = std.mem.sliceTo(str, 0);
+            gpa.allocator().free(slice);
+        }
+
+        /// Trigger the LLM command assistant for a surface.
+        /// This is equivalent to the llm_command_assistant action.
+        export fn ghostty_surface_llm_command_assistant(ptr: *Surface) bool {
+            // Trigger the llm_command_assistant action via the embedded action system
+            const result = ptr.app.performAction(
+                .{ .surface = &ptr.core_surface },
+                .llm_command_assistant,
+                {},
+            ) catch |err| {
+                log.err("error triggering llm command assistant err={}", .{err});
+                return false;
+            };
+            return result;
+        }
     };
 };
