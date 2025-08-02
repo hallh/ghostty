@@ -83,7 +83,4 @@ test {
     _ = runtime;
     _ = action;
     _ = structs;
-
-    // GTK LLM helper module tests are now inline in implementation files
-    // and will be discovered automatically through the module import chain
 }

@@ -1,6 +1,7 @@
 const std = @import("std");
 const config = @import("../config.zig");
 const llm = @import("../llm_assistant.zig");
+const i18n = @import("../os/i18n.zig");
 
 /// Default system prompt shared across all providers
 pub const DEFAULT_SYSTEM_PROMPT =
@@ -89,32 +90,18 @@ pub const BaseProvider = struct {
         body: []const u8,
         parse_cb: *const fn (allocator: std.mem.Allocator, http_response: llm.HTTPResponse) llm.LLMError!llm.LLMResponse,
     ) llm.LLMError!llm.LLMResponse {
-        var http_response = self.http_client.postJSON(url, headers, body);
+        var http_response = self.http_client.postJSON(url, headers, body) catch |err| {
+            const error_msg = switch (err) {
+                llm.LLMError.NetworkError => i18n._("Network error. Please check your internet connection."),
+                llm.LLMError.OutOfMemory => i18n._("Out of memory error."),
+                llm.LLMError.APIError => i18n._("HTTP request failed with error status."),
+                else => i18n._("HTTP request failed."),
+            };
+            return llm.makeErrorResponse(allocator, std.mem.span(error_msg));
+        };
         defer http_response.deinit();
 
         return parse_cb(allocator, http_response);
-    }
-
-    /// Generic error parsing helper for HTTP error responses
-    pub fn handleHttpError(
-        comptime ResponseType: type,
-        allocator: std.mem.Allocator,
-        http_response: llm.HTTPResponse,
-    ) ?llm.LLMResponse {
-        if (http_response.status != .err) return null;
-
-        // Try to parse structured error response
-        if (std.json.parseFromSlice(ResponseType, allocator, http_response.body, .{
-            .ignore_unknown_fields = true,
-        })) |parsed| {
-            defer parsed.deinit();
-            if (parsed.value.@"error") |err| {
-                return llm.makeErrorResponse(allocator, err.message);
-            }
-        } else |_| {}
-
-        // Fallback to raw body
-        return llm.makeErrorResponse(allocator, http_response.body);
     }
 
     /// Shared JSON stringification with consistent error handling

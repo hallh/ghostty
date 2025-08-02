@@ -3,6 +3,7 @@ const config = @import("../config.zig");
 const llm = @import("../llm_assistant.zig");
 const provider_base = @import("provider_base.zig");
 const test_utils = @import("test_utils.zig");
+const i18n = @import("../os/i18n.zig");
 
 const log = std.log.scoped(.openai_provider);
 
@@ -163,11 +164,6 @@ pub const OpenAIProvider = struct {
         allocator: std.mem.Allocator,
         http_response: llm.HTTPResponse,
     ) llm.LLMError!llm.LLMResponse {
-        // Handle HTTP errors using shared helper
-        if (provider_base.BaseProvider.handleHttpError(OpenAIResponse, allocator, http_response)) |error_response| {
-            return error_response;
-        }
-
         // Parse successful response
         const parsed = std.json.parseFromSlice(OpenAIResponse, allocator, http_response.body, .{
             .ignore_unknown_fields = true,
@@ -179,18 +175,23 @@ pub const OpenAIProvider = struct {
 
         const response = parsed.value;
 
+        // Check for API error first
+        if (response.@"error") |error_detail| {
+            return llm.makeErrorResponse(allocator, error_detail.message);
+        }
+
         // Extract command text from the first choice
         if (response.choices.len == 0) {
-            return llm.makeErrorResponse(allocator, "No choices in API response");
+            return llm.makeErrorResponse(allocator, std.mem.span(i18n._("No choices in API response")));
         }
 
         const choice = response.choices[0];
         const message = choice.message orelse {
-            return llm.makeErrorResponse(allocator, "No message in API response");
+            return llm.makeErrorResponse(allocator, std.mem.span(i18n._("No message in API response")));
         };
 
         const content = message.content orelse {
-            return llm.makeErrorResponse(allocator, "No content in API response");
+            return llm.makeErrorResponse(allocator, std.mem.span(i18n._("No content in API response")));
         };
 
         // Clean up the command text using base provider method
@@ -236,7 +237,6 @@ test "OpenAI basic response parsing" {
     defer provider.deinit(allocator);
 
     const mock_http_response = llm.HTTPResponse{
-        .status = .ok,
         .body = try allocator.dupe(u8, real_response),
         .allocator = allocator,
     };
@@ -299,7 +299,6 @@ test "OpenAI malformed JSON handling" {
     defer provider.deinit(allocator);
 
     const mock_http_response = llm.HTTPResponse{
-        .status = .ok,
         .body = try allocator.dupe(u8, malformed_json),
         .allocator = allocator,
     };
@@ -330,7 +329,6 @@ test "OpenAI error response handling" {
     defer provider.deinit(allocator);
 
     const mock_http_response = llm.HTTPResponse{
-        .status = .err,
         .body = try allocator.dupe(u8, error_response),
         .allocator = allocator,
     };

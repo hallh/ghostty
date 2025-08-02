@@ -999,12 +999,7 @@ bool ghostty_benchmark_cli(const char*, const char*);
 
 // Get terminal context for LLM assistant from a surface.
 // The returned string must be freed by the caller using ghostty_string_free.
-void ghostty_surface_llm_terminal_context(
-    ghostty_surface_t surface,
-    char** out_context);
-
-// Free a string allocated by libghostty.
-void ghostty_string_free(char* str);
+ghostty_string_s ghostty_surface_llm_terminal_context(ghostty_surface_t surface);
 
 // Trigger the LLM command assistant for a surface.
 // This is equivalent to the llm_command_assistant action.

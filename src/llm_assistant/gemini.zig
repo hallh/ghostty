@@ -3,6 +3,7 @@ const config = @import("../config.zig");
 const llm = @import("../llm_assistant.zig");
 const provider_base = @import("provider_base.zig");
 const test_utils = @import("test_utils.zig");
+const i18n = @import("../os/i18n.zig");
 
 const log = std.log.scoped(.gemini_provider);
 
@@ -210,11 +211,6 @@ pub const GeminiProvider = struct {
         allocator: std.mem.Allocator,
         http_response: llm.HTTPResponse,
     ) llm.LLMError!llm.LLMResponse {
-        // Handle HTTP errors using shared helper
-        if (provider_base.BaseProvider.handleHttpError(GeminiResponse, allocator, http_response)) |error_response| {
-            return error_response;
-        }
-
         // Parse successful response
         const parsed = std.json.parseFromSlice(GeminiResponse, allocator, http_response.body, .{
             .ignore_unknown_fields = true,
@@ -228,7 +224,7 @@ pub const GeminiProvider = struct {
 
         // Extract command text from the first candidate
         if (response.candidates.len == 0) {
-            return llm.makeErrorResponse(allocator, "No candidates in API response");
+            return llm.makeErrorResponse(allocator, std.mem.span(i18n._("No candidates in API response")));
         }
 
         const candidate = response.candidates[0];
@@ -236,20 +232,20 @@ pub const GeminiProvider = struct {
         // Check for MAX_TOKENS finish reason with empty/minimal text
         if (candidate.finishReason) |finish_reason| {
             if (std.mem.eql(u8, finish_reason, "MAX_TOKENS")) {
-                return llm.makeErrorResponse(allocator, "Response truncated due to token limit. Try increasing max_tokens or simplifying the request.");
+                return llm.makeErrorResponse(allocator, std.mem.span(i18n._("Response truncated due to token limit. Try increasing max_tokens or simplifying the request.")));
             }
         }
 
         const content = candidate.content orelse {
-            return llm.makeErrorResponse(allocator, "No content in API response");
+            return llm.makeErrorResponse(allocator, std.mem.span(i18n._("No content in API response")));
         };
 
         if (content.parts.len == 0) {
-            return llm.makeErrorResponse(allocator, "No parts in API response content");
+            return llm.makeErrorResponse(allocator, std.mem.span(i18n._("No parts in API response content")));
         }
 
         const text = content.parts[0].text orelse {
-            return llm.makeErrorResponse(allocator, "No text in API response part");
+            return llm.makeErrorResponse(allocator, std.mem.span(i18n._("No text in API response part")));
         };
 
         // Clean up the command text using base provider method
@@ -316,7 +312,14 @@ const TestGeminiProvider = struct {
         const request_json = try self.buildRequestJSON(allocator, req);
         defer allocator.free(request_json);
 
-        var http_response = self.mock_client.postJSON("", &[_]std.http.Header{}, request_json);
+        var http_response = self.mock_client.postJSON("", &[_]std.http.Header{}, request_json) catch |err| {
+            const error_msg = switch (err) {
+                llm.LLMError.APIError => std.mem.span(i18n._("API Error")),
+                llm.LLMError.NetworkError => std.mem.span(i18n._("Network Error")),
+                else => std.mem.span(i18n._("HTTP Error")),
+            };
+            return llm.makeErrorResponse(allocator, error_msg);
+        };
         defer http_response.deinit();
 
         return self.parseResponse(allocator, http_response);
@@ -349,10 +352,6 @@ const TestGeminiProvider = struct {
     fn parseResponse(self: *TestGeminiProvider, allocator: std.mem.Allocator, http_response: llm.HTTPResponse) !llm.LLMResponse {
         _ = self;
 
-        if (http_response.status == .err) {
-            return llm.makeErrorResponse(allocator, "HTTP error");
-        }
-
         const parsed = std.json.parseFromSlice(GeminiProvider.GeminiResponse, allocator, http_response.body, .{}) catch {
             return llm.LLMError.JSONParseError;
         };
@@ -373,7 +372,7 @@ const TestGeminiProvider = struct {
             }
         }
 
-        return llm.makeErrorResponse(allocator, "No command text received from API");
+        return llm.makeErrorResponse(allocator, std.mem.span(i18n._("No command text received from API")));
     }
 };
 

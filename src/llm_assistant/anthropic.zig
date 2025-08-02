@@ -3,6 +3,7 @@ const config = @import("../config.zig");
 const llm = @import("../llm_assistant.zig");
 const provider_base = @import("provider_base.zig");
 const test_utils = @import("test_utils.zig");
+const i18n = @import("../os/i18n.zig");
 
 const log = std.log.scoped(.anthropic_provider);
 
@@ -158,11 +159,6 @@ pub const AnthropicProvider = struct {
         allocator: std.mem.Allocator,
         http_response: llm.HTTPResponse,
     ) llm.LLMError!llm.LLMResponse {
-        // Handle HTTP errors using shared helper
-        if (provider_base.BaseProvider.handleHttpError(AnthropicResponse, allocator, http_response)) |error_response| {
-            return error_response;
-        }
-
         // Parse successful response
         const parsed = std.json.parseFromSlice(AnthropicResponse, allocator, http_response.body, .{
             .ignore_unknown_fields = true,
@@ -187,7 +183,7 @@ pub const AnthropicProvider = struct {
         }
 
         if (command_text.items.len == 0) {
-            return llm.makeErrorResponse(allocator, "No command text received from API");
+            return llm.makeErrorResponse(allocator, std.mem.span(i18n._("No command text received from API")));
         }
 
         // Clean up the command text using base provider method
@@ -249,7 +245,14 @@ const TestAnthropicProvider = struct {
         const request_json = try self.buildRequestJSON(allocator, req, false);
         defer allocator.free(request_json);
 
-        var http_response = self.mock_client.postJSON("", &[_]std.http.Header{}, request_json);
+        var http_response = self.mock_client.postJSON("", &[_]std.http.Header{}, request_json) catch |err| {
+            const error_msg = switch (err) {
+                llm.LLMError.APIError => std.mem.span(i18n._("API Error")),
+                llm.LLMError.NetworkError => std.mem.span(i18n._("Network Error")),
+                else => std.mem.span(i18n._("HTTP Error")),
+            };
+            return llm.makeErrorResponse(allocator, error_msg);
+        };
         defer http_response.deinit();
 
         return self.parseResponse(allocator, http_response);
@@ -286,10 +289,6 @@ const TestAnthropicProvider = struct {
     fn parseResponse(self: *TestAnthropicProvider, allocator: std.mem.Allocator, http_response: llm.HTTPResponse) !llm.LLMResponse {
         _ = self;
 
-        if (http_response.status == .err) {
-            return llm.makeErrorResponse(allocator, "HTTP error");
-        }
-
         const parsed = std.json.parseFromSlice(AnthropicProvider.AnthropicResponse, allocator, http_response.body, .{}) catch {
             return llm.LLMError.JSONParseError;
         };
@@ -307,7 +306,7 @@ const TestAnthropicProvider = struct {
             }
         }
 
-        return llm.makeErrorResponse(allocator, "No command text received from API");
+        return llm.makeErrorResponse(allocator, std.mem.span(i18n._("No command text received from API")));
     }
 };
 

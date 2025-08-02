@@ -1116,7 +1116,7 @@ pub const Action = union(enum) {
     /// exhaustive switch safety to ensure we always properly handle certain
     /// scoped actions.
     pub fn scoped(self: Action, comptime s: Scope) ?Scoped(s) {
-        return switch (self) {
+        switch (self) {
             inline else => |v, tag| {
                 // Use comptime to prune out non-app actions
                 if (comptime @unionInit(
@@ -1132,7 +1132,7 @@ pub const Action = union(enum) {
                     v,
                 );
             },
-        };
+        }
     }
 
     /// Implements the formatter for the fmt package. This encodes the

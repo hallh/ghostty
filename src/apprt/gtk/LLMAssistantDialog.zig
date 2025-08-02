@@ -24,11 +24,12 @@ const Pin = terminal.Pin;
 // LLM helper modules
 const llm_terminal_context_gtk = @import("llm/terminal_context_gtk.zig");
 const llm_prompt_builder = @import("../../llm_assistant/prompt_builder.zig");
-const llm_history_gtk = @import("llm/history_gtk.zig");
+const llm_history = @import("../../llm_assistant/history.zig");
 const llm_worker = @import("llm/worker_glib.zig");
 const terminal_context_mod = @import("../../llm_assistant/terminal_context.zig");
 const LLMTerminalContext = terminal_context_mod.TerminalContext;
-const HistoryManager = llm_history_gtk.HistoryGTK;
+const History = llm_history.History;
+const Direction = llm_history.Direction;
 
 const log = std.log.scoped(.llm_assistant_dialog);
 
@@ -63,7 +64,7 @@ shortcuts_hint: *gtk.Label,
 // State
 llm_provider: ?llm.LLMProvider = null,
 pulse_timer: ?c_uint = null,
-history_manager: HistoryManager,
+history_manager: History,
 current_response: ?[]u8 = null,
 current_state: UIState = .input,
 
@@ -133,7 +134,7 @@ pub fn init(self: *LLMAssistantDialog, window: *Window) !void {
         .accept_button = builder.getObject(gtk.Button, "accept-button").?,
         .input_spacer = builder.getObject(gtk.Box, "input-spacer").?,
         .shortcuts_hint = builder.getObject(gtk.Label, "shortcuts-hint").?,
-        .history_manager = HistoryManager.init(window.app.core_app.alloc),
+        .history_manager = History.init(window.app.core_app.alloc),
     };
 
     // Get the text buffer for the suggestion text view
@@ -319,11 +320,13 @@ fn onKeyPressed(
 ) callconv(.c) c_int {
     switch (keyval) {
         gdk.KEY_Up => {
-            self.history_manager.navigate(.previous, self.prompt_entry);
+            const text = self.history_manager.navigate(.previous);
+            self.updateEntryText(text);
             return 1;
         },
         gdk.KEY_Down => {
-            self.history_manager.navigate(.next, self.prompt_entry);
+            const text = self.history_manager.navigate(.next);
+            self.updateEntryText(text);
             return 1;
         },
         gdk.KEY_Return, gdk.KEY_KP_Enter => {
@@ -556,4 +559,13 @@ fn closeAndClearInput(self: *LLMAssistantDialog) void {
     // Retain previous prompt in history
     gtk.Editable.setText(self.prompt_entry.as(gtk.Editable), "");
     _ = self.dialog.close();
+}
+
+/// Update entry text with optional text from history navigation
+fn updateEntryText(self: *LLMAssistantDialog, text: ?[]const u8) void {
+    if (text) |t| {
+        gtk.Editable.setText(self.prompt_entry.as(gtk.Editable), @ptrCast(t.ptr));
+    } else {
+        gtk.Editable.setText(self.prompt_entry.as(gtk.Editable), "");
+    }
 }

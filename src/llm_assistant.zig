@@ -49,7 +49,6 @@ pub const LLMRequest = struct {
     temperature: ?f32 = null,
     max_tokens: ?u32 = null,
     system_prompt: ?[]const u8 = null,
-    terminal_context: ?TerminalContext = null,
 };
 
 /// Response structure for LLM responses
@@ -84,14 +83,8 @@ pub fn makeErrorResponse(allocator: std.mem.Allocator, error_text: []const u8) L
     };
 }
 
-/// Terminal context for richer prompts
-pub const TerminalContext = struct {
-    command_history: ?[]const u8 = null,
-};
-
 /// Unified HTTP response structure
 pub const HTTPResponse = struct {
-    status: enum { ok, err },
     body: []u8,
     allocator: std.mem.Allocator,
 
@@ -161,13 +154,9 @@ pub const HTTPClient = struct {
         url: []const u8,
         headers: []const std.http.Header,
         json_payload: []const u8,
-    ) HTTPResponse {
+    ) LLMError!HTTPResponse {
         const uri = std.Uri.parse(url) catch {
-            return HTTPResponse{
-                .status = .err,
-                .body = self.allocator.dupe(u8, std.mem.span(i18n._("Invalid URL provided"))) catch @panic("Out of memory for error message"),
-                .allocator = self.allocator,
-            };
+            return LLMError.NetworkError;
         };
 
         var response_buffer = std.ArrayList(u8).init(self.allocator);
@@ -183,48 +172,28 @@ pub const HTTPClient = struct {
             &header_buffer,
         ) catch |err| {
             response_buffer.deinit();
-            const error_msg = switch (err) {
-                LLMError.NetworkError => i18n._("Network error. Please check your internet connection."),
-                LLMError.OutOfMemory => i18n._("Out of memory error."),
-                else => i18n._("HTTP request failed."),
-            };
-            return HTTPResponse{
-                .status = .err,
-                .body = self.allocator.dupe(u8, std.mem.span(error_msg)) catch @panic("Out of memory for error message"),
-                .allocator = self.allocator,
-            };
+            return err;
         };
 
         // Check HTTP status for errors
         if (@intFromEnum(result.status) >= 400) {
             const body = response_buffer.toOwnedSlice() catch {
                 response_buffer.deinit();
-                return HTTPResponse{
-                    .status = .err,
-                    .body = self.allocator.dupe(u8, std.mem.span(i18n._("HTTP error and failed to read response body"))) catch @panic("Out of memory for error message"),
-                    .allocator = self.allocator,
-                };
+                return LLMError.OutOfMemory;
             };
 
-            return HTTPResponse{
-                .status = .err,
-                .body = body,
-                .allocator = self.allocator,
-            };
+            // Return error with the HTTP error body for debugging
+            defer self.allocator.free(body);
+            return LLMError.APIError;
         }
 
         // Success case
         const body = response_buffer.toOwnedSlice() catch {
             response_buffer.deinit();
-            return HTTPResponse{
-                .status = .err,
-                .body = self.allocator.dupe(u8, std.mem.span(i18n._("Failed to allocate response body"))) catch @panic("Out of memory for error message"),
-                .allocator = self.allocator,
-            };
+            return LLMError.OutOfMemory;
         };
 
         return HTTPResponse{
-            .status = .ok,
             .body = body,
             .allocator = self.allocator,
         };
@@ -369,23 +338,19 @@ test "HTTPResponse lifecycle" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const test_cases = [_]struct {
-        status: @TypeOf(@as(HTTPResponse, undefined).status),
-        body: []const u8,
-    }{
-        .{ .status = .ok, .body = "successful response" },
-        .{ .status = .err, .body = "error occurred" },
+    const test_cases = [_][]const u8{
+        "successful response",
+        "error occurred",
+        "empty string",
     };
 
-    for (test_cases) |case| {
+    for (test_cases) |body_text| {
         var response = HTTPResponse{
-            .status = case.status,
-            .body = try allocator.dupe(u8, case.body),
+            .body = try allocator.dupe(u8, body_text),
             .allocator = allocator,
         };
 
-        try testing.expect(response.status == case.status);
-        try testing.expectEqualStrings(case.body, response.body);
+        try testing.expectEqualStrings(body_text, response.body);
         response.deinit();
     }
 }

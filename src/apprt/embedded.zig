@@ -18,6 +18,7 @@ const terminal = @import("../terminal/main.zig");
 const CoreApp = @import("../App.zig");
 const CoreInspector = @import("../inspector/main.zig").Inspector;
 const CoreSurface = @import("../Surface.zig");
+const String = @import("../main_c.zig").String;
 const configpkg = @import("../config.zig");
 const Config = configpkg.Config;
 
@@ -2147,12 +2148,7 @@ pub const CAPI = struct {
 
         /// Get terminal context for LLM assistant from a surface.
         /// The returned string must be freed by the caller using ghostty_string_free.
-        export fn ghostty_surface_llm_terminal_context(
-            ptr: *Surface,
-            out_context: *?[*:0]u8,
-        ) void {
-            out_context.* = null; // Default to null, early return pattern
-
+        export fn ghostty_surface_llm_terminal_context(ptr: *Surface) String {
             const embedded_terminal_context = @import("embedded/llm/terminal_context_embedded.zig");
 
             // Get terminal context using the cross-platform implementation
@@ -2161,35 +2157,23 @@ pub const CAPI = struct {
                 ptr,
             ) catch |err| {
                 log.err("error getting terminal context err={}", .{err});
-                return;
+                return String.empty;
             };
             defer if (context) |*c| c.deinit();
 
             // Guard clause: early return if no context
-            const c = context orelse return;
+            const c = context orelse return String.empty;
 
             // Guard clause: early return if no content
-            const content = c.current_input_full_line orelse return;
+            const content = c.current_input_full_line orelse return String.empty;
 
-            // Duplicate the content as a null-terminated string
-            const result = ptr.app.core_app.alloc.dupeZ(u8, content) catch |err| {
+            // Duplicate the content
+            const result = ptr.app.core_app.alloc.dupe(u8, content) catch |err| {
                 log.err("error duplicating terminal context err={}", .{err});
-                return;
+                return String.empty;
             };
-            out_context.* = result.ptr;
-        }
 
-        /// Free a string allocated by libghostty.
-        export fn ghostty_string_free(str: [*:0]u8) void {
-            // We need to get the allocator somewhere. For now, we'll use the global state.
-            // This is a limitation of the current C API design.
-            const global_state = &@import("../global.zig").state;
-
-            // Guard clause: early return if no allocator available
-            const gpa = global_state.gpa orelse return;
-
-            const slice = std.mem.sliceTo(str, 0);
-            gpa.allocator().free(slice);
+            return String.fromSlice(result);
         }
 
         /// Trigger the LLM command assistant for a surface.
