@@ -185,13 +185,13 @@ fn processRequestSync(
     // Clean up the LLM response when we're done
     defer {
         var mutable_result = result;
-        mutable_result.deinit(std.heap.page_allocator);
+        mutable_result.deinit();
     }
 
     // Check for API-level errors first
-    if (result.error_message) |error_msg| {
+    if (result.status == .err) {
         std.heap.page_allocator.free(response.text);
-        response.text = std.heap.page_allocator.dupe(u8, error_msg) catch @panic("Out of memory for error message");
+        response.text = std.heap.page_allocator.dupe(u8, result.text) catch @panic("Out of memory for error message");
         response.status = .err;
 
         // Schedule callback
@@ -201,7 +201,7 @@ fn processRequestSync(
 
     // Success case
     std.heap.page_allocator.free(response.text);
-    response.text = std.heap.page_allocator.dupe(u8, result.command) catch @panic("Out of memory for response text");
+    response.text = std.heap.page_allocator.dupe(u8, result.text) catch @panic("Out of memory for response text");
     response.status = .ok;
 
     // Schedule callback

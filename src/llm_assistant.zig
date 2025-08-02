@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const config = @import("config.zig");
 const input = @import("input.zig");
+const i18n = @import("os/i18n.zig");
 
 const log = std.log.scoped(.llm_assistant);
 
@@ -53,21 +54,50 @@ pub const LLMRequest = struct {
 
 /// Response structure for LLM responses
 pub const LLMResponse = struct {
-    command: []const u8,
-    error_message: ?[]const u8 = null,
+    status: enum { ok, err },
+    text: []u8,
+    allocator: std.mem.Allocator,
     is_final: bool = false,
 
-    pub fn deinit(self: *LLMResponse, allocator: std.mem.Allocator) void {
-        allocator.free(self.command);
-        if (self.error_message) |msg| {
-            allocator.free(msg);
-        }
+    pub fn deinit(self: *LLMResponse) void {
+        self.allocator.free(self.text);
     }
 };
+
+/// Helper function to create a successful LLM response
+pub fn makeSuccessResponse(allocator: std.mem.Allocator, command: []const u8) LLMResponse {
+    return LLMResponse{
+        .status = .ok,
+        .text = allocator.dupe(u8, command) catch return makeErrorResponse(allocator, std.mem.span(i18n._("Failed to allocate memory for command"))),
+        .allocator = allocator,
+        .is_final = true,
+    };
+}
+
+/// Helper function to create an error LLM response
+pub fn makeErrorResponse(allocator: std.mem.Allocator, error_text: []const u8) LLMResponse {
+    return LLMResponse{
+        .status = .err,
+        .text = allocator.dupe(u8, error_text) catch @panic("Out of memory creating error response"),
+        .allocator = allocator,
+        .is_final = false,
+    };
+}
 
 /// Terminal context for richer prompts
 pub const TerminalContext = struct {
     command_history: ?[]const u8 = null,
+};
+
+/// Unified HTTP response structure
+pub const HTTPResponse = struct {
+    status: enum { ok, err },
+    body: []u8,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *HTTPResponse) void {
+        self.allocator.free(self.body);
+    }
 };
 
 /// HTTP client wrapper for LLM API calls
@@ -90,25 +120,24 @@ pub const HTTPClient = struct {
         self.client.deinit();
     }
 
-    /// Make a POST request with JSON payload
-    pub fn postJSON(
-        self: *Self,
-        url: []const u8,
+    /// Helper function to handle HTTP fetch errors
+    fn tryFetch(
+        client: *std.http.Client,
+        method: std.http.Method,
+        uri: std.Uri,
         headers: []const std.http.Header,
-        json_payload: []const u8,
+        payload: []const u8,
         response_buffer: *std.ArrayList(u8),
-    ) LLMError!std.http.Status {
-        const uri = std.Uri.parse(url) catch return LLMError.InvalidConfiguration;
-
-        var header_buffer: [16 * 1024]u8 = undefined;
-        const result = self.client.fetch(.{
-            .method = .POST,
+        header_buffer: []u8,
+    ) LLMError!std.http.Client.FetchResult {
+        return client.fetch(.{
+            .method = method,
             .location = .{ .uri = uri },
             .headers = .{ .content_type = .{ .override = "application/json" } },
             .extra_headers = headers,
-            .payload = json_payload,
+            .payload = payload,
             .response_storage = .{ .dynamic = response_buffer },
-            .server_header_buffer = &header_buffer,
+            .server_header_buffer = header_buffer,
         }) catch |err| switch (err) {
             error.ConnectionRefused,
             error.NetworkUnreachable,
@@ -120,12 +149,85 @@ pub const HTTPClient = struct {
             error.OutOfMemory => return LLMError.OutOfMemory,
 
             else => {
-                log.err("HTTP request failed: {}", .{err});
+                log.err("{s}: {}", .{ i18n._("HTTP request failed"), err });
                 return LLMError.NetworkError;
             },
         };
+    }
 
-        return result.status;
+    /// Make a POST request with JSON payload - returns unified response
+    pub fn postJSON(
+        self: *Self,
+        url: []const u8,
+        headers: []const std.http.Header,
+        json_payload: []const u8,
+    ) HTTPResponse {
+        const uri = std.Uri.parse(url) catch {
+            return HTTPResponse{
+                .status = .err,
+                .body = self.allocator.dupe(u8, std.mem.span(i18n._("Invalid URL provided"))) catch @panic("Out of memory for error message"),
+                .allocator = self.allocator,
+            };
+        };
+
+        var response_buffer = std.ArrayList(u8).init(self.allocator);
+        var header_buffer: [16 * 1024]u8 = undefined;
+
+        const result = tryFetch(
+            &self.client,
+            .POST,
+            uri,
+            headers,
+            json_payload,
+            &response_buffer,
+            &header_buffer,
+        ) catch |err| {
+            response_buffer.deinit();
+            const error_msg = switch (err) {
+                LLMError.NetworkError => i18n._("Network error. Please check your internet connection."),
+                LLMError.OutOfMemory => i18n._("Out of memory error."),
+                else => i18n._("HTTP request failed."),
+            };
+            return HTTPResponse{
+                .status = .err,
+                .body = self.allocator.dupe(u8, std.mem.span(error_msg)) catch @panic("Out of memory for error message"),
+                .allocator = self.allocator,
+            };
+        };
+
+        // Check HTTP status for errors
+        if (@intFromEnum(result.status) >= 400) {
+            const body = response_buffer.toOwnedSlice() catch {
+                response_buffer.deinit();
+                return HTTPResponse{
+                    .status = .err,
+                    .body = self.allocator.dupe(u8, std.mem.span(i18n._("HTTP error and failed to read response body"))) catch @panic("Out of memory for error message"),
+                    .allocator = self.allocator,
+                };
+            };
+
+            return HTTPResponse{
+                .status = .err,
+                .body = body,
+                .allocator = self.allocator,
+            };
+        }
+
+        // Success case
+        const body = response_buffer.toOwnedSlice() catch {
+            response_buffer.deinit();
+            return HTTPResponse{
+                .status = .err,
+                .body = self.allocator.dupe(u8, std.mem.span(i18n._("Failed to allocate response body"))) catch @panic("Out of memory for error message"),
+                .allocator = self.allocator,
+            };
+        };
+
+        return HTTPResponse{
+            .status = .ok,
+            .body = body,
+            .allocator = self.allocator,
+        };
     }
 };
 
@@ -150,12 +252,37 @@ pub fn getConfigurationError(cfg: *const config.Config) [*:0]const u8 {
 
     if (api_key == null) {
         return switch (provider) {
-            .anthropic => "LLM assistant requires an Anthropic API key. Please set 'ext-llm-anthropic-api-key' in your configuration.",
-            .openai => "LLM assistant requires an OpenAI API key. Please set 'ext-llm-openai-api-key' in your configuration.",
-            .gemini => "LLM assistant requires a Gemini API key. Please set 'ext-llm-gemini-api-key' in your configuration.",
+            .anthropic => i18n._("LLM assistant requires an Anthropic API key. Please set 'ext-llm-anthropic-api-key' in your configuration."),
+            .openai => i18n._("LLM assistant requires an OpenAI API key. Please set 'ext-llm-openai-api-key' in your configuration."),
+            .gemini => i18n._("LLM assistant requires a Gemini API key. Please set 'ext-llm-gemini-api-key' in your configuration."),
         };
     }
-    return "LLM configuration is incomplete. Please check your settings.";
+    return i18n._("LLM configuration is incomplete. Please check your settings.");
+}
+
+/// Helper functions for creating providers
+fn createAnthropicProvider(allocator: std.mem.Allocator, api_key: []const u8, cfg: *const config.Config) LLMError!LLMProvider {
+    const provider = try anthropic.AnthropicProvider.init(allocator, api_key, cfg);
+    return LLMProvider{
+        .ptr = provider,
+        .vtable = &anthropic.AnthropicProvider.vtable,
+    };
+}
+
+fn createOpenAIProvider(allocator: std.mem.Allocator, api_key: []const u8, cfg: *const config.Config) LLMError!LLMProvider {
+    const provider = try openai.OpenAIProvider.init(allocator, api_key, cfg);
+    return LLMProvider{
+        .ptr = provider,
+        .vtable = &openai.OpenAIProvider.vtable,
+    };
+}
+
+fn createGeminiProvider(allocator: std.mem.Allocator, api_key: []const u8, cfg: *const config.Config) LLMError!LLMProvider {
+    const provider = try gemini.GeminiProvider.init(allocator, api_key, cfg);
+    return LLMProvider{
+        .ptr = provider,
+        .vtable = &gemini.GeminiProvider.vtable,
+    };
 }
 
 /// Create a provider instance based on configuration
@@ -166,29 +293,11 @@ pub fn createProvider(
     const provider_type = cfg.@"ext-llm-provider";
     const api_key = getApiKeyForProvider(cfg, provider_type) orelse return LLMError.InvalidConfiguration;
 
-    switch (provider_type) {
-        .anthropic => {
-            const provider = try anthropic.AnthropicProvider.init(allocator, api_key, cfg);
-            return LLMProvider{
-                .ptr = provider,
-                .vtable = &anthropic.AnthropicProvider.vtable,
-            };
-        },
-        .openai => {
-            const provider = try openai.OpenAIProvider.init(allocator, api_key, cfg);
-            return LLMProvider{
-                .ptr = provider,
-                .vtable = &openai.OpenAIProvider.vtable,
-            };
-        },
-        .gemini => {
-            const provider = try gemini.GeminiProvider.init(allocator, api_key, cfg);
-            return LLMProvider{
-                .ptr = provider,
-                .vtable = &gemini.GeminiProvider.vtable,
-            };
-        },
-    }
+    return switch (provider_type) {
+        .anthropic => createAnthropicProvider(allocator, api_key, cfg),
+        .openai => createOpenAIProvider(allocator, api_key, cfg),
+        .gemini => createGeminiProvider(allocator, api_key, cfg),
+    };
 }
 
 // Provider implementations (forward declarations)
@@ -205,54 +314,79 @@ test {
     _ = @import("llm_assistant/gemini.zig");
 }
 
-test "provider-specific API keys and models" {
+test "provider configuration and functionality" {
     const testing = std.testing;
 
-    // Test all providers have their specific keys and models
-    {
+    // Table-driven test for all providers
+    const test_cases = [_]struct {
+        provider: config.Config.LLMProvider,
+        key_field: []const u8,
+        model_field: []const u8,
+        key_value: []const u8,
+        model_value: []const u8,
+    }{
+        .{ .provider = .anthropic, .key_field = "anthropic-key", .model_field = "anthropic-model", .key_value = "anthropic-key", .model_value = "claude-3-7-sonnet-latest" },
+        .{ .provider = .openai, .key_field = "openai-key", .model_field = "openai-model", .key_value = "openai-key", .model_value = "gpt-4.1" },
+        .{ .provider = .gemini, .key_field = "gemini-key", .model_field = "gemini-model", .key_value = "gemini-key", .model_value = "gemini-2.5-flash" },
+    };
+
+    for (test_cases) |case| {
+        // Test API key retrieval and configuration
         var cfg = config.Config{};
-        cfg.@"ext-llm-anthropic-api-key" = "anthropic-key";
-        cfg.@"ext-llm-openai-api-key" = "openai-key";
-        cfg.@"ext-llm-gemini-api-key" = "gemini-key";
+        cfg.@"ext-llm-provider" = case.provider;
 
-        cfg.@"ext-llm-anthropic-model" = "anthropic-model";
-        cfg.@"ext-llm-openai-model" = "openai-model";
-        cfg.@"ext-llm-gemini-model" = "gemini-model";
+        switch (case.provider) {
+            .anthropic => {
+                cfg.@"ext-llm-anthropic-api-key" = case.key_value;
+                try testing.expectEqualStrings(case.key_value, getApiKeyForProvider(&cfg, case.provider).?);
+                try testing.expectEqualStrings(case.model_value, cfg.@"ext-llm-anthropic-model".?);
+            },
+            .openai => {
+                cfg.@"ext-llm-openai-api-key" = case.key_value;
+                try testing.expectEqualStrings(case.key_value, getApiKeyForProvider(&cfg, case.provider).?);
+                try testing.expectEqualStrings(case.model_value, cfg.@"ext-llm-openai-model".?);
+            },
+            .gemini => {
+                cfg.@"ext-llm-gemini-api-key" = case.key_value;
+                try testing.expectEqualStrings(case.key_value, getApiKeyForProvider(&cfg, case.provider).?);
+                try testing.expectEqualStrings(case.model_value, cfg.@"ext-llm-gemini-model".?);
+            },
+        }
 
-        try testing.expectEqualStrings("anthropic-key", getApiKeyForProvider(&cfg, .anthropic).?);
-        try testing.expectEqualStrings("openai-key", getApiKeyForProvider(&cfg, .openai).?);
-        try testing.expectEqualStrings("gemini-key", getApiKeyForProvider(&cfg, .gemini).?);
-
-        try testing.expectEqualStrings("anthropic-model", cfg.@"ext-llm-anthropic-model".?);
-        try testing.expectEqualStrings("openai-model", cfg.@"ext-llm-openai-model".?);
-        try testing.expectEqualStrings("gemini-model", cfg.@"ext-llm-gemini-model".?);
-    }
-
-    // Test isConfigured with provider-specific keys
-    {
-        var cfg = config.Config{};
-        cfg.@"ext-llm-openai-api-key" = "openai-key";
-        cfg.@"ext-llm-provider" = .openai;
-
+        // Test configuration validation
         try testing.expect(isConfigured(&cfg));
+
+        // Test missing key detection
+        var empty_cfg = config.Config{};
+        empty_cfg.@"ext-llm-provider" = case.provider;
+        try testing.expect(!isConfigured(&empty_cfg));
     }
+}
 
-    // Test missing provider-specific key
-    {
-        var cfg = config.Config{};
-        cfg.@"ext-llm-provider" = .anthropic;
-        // No anthropic key set
+test "HTTPResponse lifecycle" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
-        try testing.expect(!isConfigured(&cfg));
-    }
+    const test_cases = [_]struct {
+        status: @TypeOf(@as(HTTPResponse, undefined).status),
+        body: []const u8,
+    }{
+        .{ .status = .ok, .body = "successful response" },
+        .{ .status = .err, .body = "error occurred" },
+    };
 
-    // Test provider-specific models return null when not set
-    {
-        const cfg = config.Config{};
+    for (test_cases) |case| {
+        var response = HTTPResponse{
+            .status = case.status,
+            .body = try allocator.dupe(u8, case.body),
+            .allocator = allocator,
+        };
 
-        try testing.expectEqualStrings("claude-3-7-sonnet-latest", cfg.@"ext-llm-anthropic-model".?);
-        try testing.expectEqualStrings("gpt-4.1", cfg.@"ext-llm-openai-model".?);
-        try testing.expectEqualStrings("gemini-2.5-flash", cfg.@"ext-llm-gemini-model".?);
+        try testing.expect(response.status == case.status);
+        try testing.expectEqualStrings(case.body, response.body);
+        response.deinit();
     }
 }
 

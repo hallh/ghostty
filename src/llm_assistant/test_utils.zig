@@ -146,18 +146,90 @@ pub const MockHTTPClient = struct {
         _: []const u8,
         _: []const std.http.Header,
         _: []const u8,
-        response_buffer: *std.ArrayList(u8),
-    ) !std.http.Status {
-        if (self.error_to_return) |err| {
-            return err;
+    ) llm.HTTPResponse {
+        const allocator = std.heap.page_allocator; // Use page allocator for tests
+
+        if (self.error_to_return != null or @intFromEnum(self.status_code) >= 400) {
+            const error_body = if (self.response_chunks.len > 0)
+                self.response_chunks[0]
+            else
+                "HTTP error";
+
+            return llm.HTTPResponse{
+                .status = .err,
+                .body = allocator.dupe(u8, error_body) catch @panic("Out of memory in mock"),
+                .allocator = allocator,
+            };
         }
 
-        // Simulate response
-        if (self.response_chunks.len > 0) {
-            try response_buffer.appendSlice(self.response_chunks[0]);
-        }
+        // Simulate successful response
+        const response_body = if (self.response_chunks.len > 0)
+            self.response_chunks[0]
+        else
+            "{}";
 
-        return self.status_code;
+        return llm.HTTPResponse{
+            .status = .ok,
+            .body = allocator.dupe(u8, response_body) catch @panic("Out of memory in mock"),
+            .allocator = allocator,
+        };
+    }
+};
+
+/// Generic test provider that works with any real provider implementation
+/// This replaces the TestXProvider structs in each provider file
+pub const GenericTestProvider = struct {
+    allocator: std.mem.Allocator,
+    api_key: []const u8,
+    model: []const u8,
+    temperature: f32,
+    max_tokens: u32,
+    system_prompt: []const u8,
+    mock_client: MockHTTPClient,
+
+    // Function pointers to real provider methods
+    buildRequestJSONFn: *const fn (allocator: std.mem.Allocator, req: llm.LLMRequest, provider: *GenericTestProvider) llm.LLMError![]u8,
+    parseResponseFn: *const fn (allocator: std.mem.Allocator, http_response: llm.HTTPResponse) llm.LLMError!llm.LLMResponse,
+
+    const Self = @This();
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        mock_client: MockHTTPClient,
+        buildRequestJSONFn: *const fn (allocator: std.mem.Allocator, req: llm.LLMRequest, provider: *GenericTestProvider) llm.LLMError![]u8,
+        parseResponseFn: *const fn (allocator: std.mem.Allocator, http_response: llm.HTTPResponse) llm.LLMError!llm.LLMResponse,
+        model: []const u8,
+    ) !*GenericTestProvider {
+        const provider = try allocator.create(GenericTestProvider);
+        provider.* = GenericTestProvider{
+            .allocator = allocator,
+            .api_key = try allocator.dupe(u8, "test-key"),
+            .model = try allocator.dupe(u8, model),
+            .temperature = 0.7,
+            .max_tokens = 1024,
+            .system_prompt = try allocator.dupe(u8, "test prompt"),
+            .mock_client = mock_client,
+            .buildRequestJSONFn = buildRequestJSONFn,
+            .parseResponseFn = parseResponseFn,
+        };
+        return provider;
+    }
+
+    pub fn deinit(self: *GenericTestProvider) void {
+        self.allocator.free(self.api_key);
+        self.allocator.free(self.model);
+        self.allocator.free(self.system_prompt);
+        self.allocator.destroy(self);
+    }
+
+    pub fn request(self: *GenericTestProvider, allocator: std.mem.Allocator, req: llm.LLMRequest) !llm.LLMResponse {
+        const request_json = try self.buildRequestJSONFn(allocator, req, self);
+        defer allocator.free(request_json);
+
+        var http_response = self.mock_client.postJSON("", &[_]std.http.Header{}, request_json);
+        defer http_response.deinit();
+
+        return self.parseResponseFn(allocator, http_response);
     }
 };
 
@@ -169,9 +241,8 @@ test "MockHTTPClient error handling" {
         .error_to_return = error.ConnectionRefused,
     };
 
-    var response_buffer = std.ArrayList(u8).init(testing.allocator);
-    defer response_buffer.deinit();
+    var result = mock.postJSON("", &[_]std.http.Header{}, "");
+    defer result.deinit();
 
-    const result = mock.postJSON("", &[_]std.http.Header{}, "", &response_buffer);
-    try testing.expectError(error.ConnectionRefused, result);
+    try testing.expectEqual(@as(@TypeOf(result.status), .err), result.status);
 }

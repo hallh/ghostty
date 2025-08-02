@@ -80,6 +80,79 @@ pub const BaseProvider = struct {
         self.http_client.deinit();
     }
 
+    /// Shared HTTP request handling template
+    pub fn sendJSONRequest(
+        self: *Self,
+        allocator: std.mem.Allocator,
+        url: []const u8,
+        headers: []const std.http.Header,
+        body: []const u8,
+        parse_cb: *const fn (allocator: std.mem.Allocator, http_response: llm.HTTPResponse) llm.LLMError!llm.LLMResponse,
+    ) llm.LLMError!llm.LLMResponse {
+        var http_response = self.http_client.postJSON(url, headers, body);
+        defer http_response.deinit();
+
+        return parse_cb(allocator, http_response);
+    }
+
+    /// Generic error parsing helper for HTTP error responses
+    pub fn handleHttpError(
+        comptime ResponseType: type,
+        allocator: std.mem.Allocator,
+        http_response: llm.HTTPResponse,
+    ) ?llm.LLMResponse {
+        if (http_response.status != .err) return null;
+
+        // Try to parse structured error response
+        if (std.json.parseFromSlice(ResponseType, allocator, http_response.body, .{
+            .ignore_unknown_fields = true,
+        })) |parsed| {
+            defer parsed.deinit();
+            if (parsed.value.@"error") |err| {
+                return llm.makeErrorResponse(allocator, err.message);
+            }
+        } else |_| {}
+
+        // Fallback to raw body
+        return llm.makeErrorResponse(allocator, http_response.body);
+    }
+
+    /// Shared JSON stringification with consistent error handling
+    pub fn stringifyAllocOrLog(
+        comptime provider_name: []const u8,
+        allocator: std.mem.Allocator,
+        value: anytype,
+    ) llm.LLMError![]u8 {
+        return std.json.stringifyAlloc(allocator, value, .{}) catch |err| {
+            // Use a simple scoped logger for the provider
+            std.log.err("Failed to serialize {s} request: {}", .{ provider_name, err });
+            return llm.LLMError.JSONParseError;
+        };
+    }
+
+    /// Build Bearer authorization header (for OpenAI)
+    pub fn buildBearerHeader(
+        self: *Self,
+        allocator: std.mem.Allocator,
+    ) !std.http.Header {
+        const value = try std.fmt.allocPrint(allocator, "Bearer {s}", .{self.api_key});
+        return std.http.Header{ .name = "Authorization", .value = value };
+    }
+
+    /// Build x-api-key header (for Anthropic)
+    pub fn buildXApiKeyHeader(self: *Self) std.http.Header {
+        return std.http.Header{ .name = "x-api-key", .value = self.api_key };
+    }
+
+    /// Free dynamically allocated header value
+    pub fn freeHeaderValue(self: *Self, allocator: std.mem.Allocator, header: std.http.Header) void {
+        _ = self; // Not used, but keeps it as a member function
+        // Only free if it looks like a dynamically allocated value (contains formatted content)
+        if (std.mem.indexOf(u8, header.value, "Bearer ") != null) {
+            allocator.free(header.value);
+        }
+    }
+
     /// Clean command text by removing common prefixes and formatting
     pub fn cleanCommandText(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
         var cleaned = std.mem.trim(u8, text, " \t\n\r");

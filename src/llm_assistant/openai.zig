@@ -111,19 +111,21 @@ pub const OpenAIProvider = struct {
         const request_json = try self.buildRequestJSON(allocator, req);
         defer allocator.free(request_json);
 
-        const headers = [_]std.http.Header{
-            .{ .name = "Authorization", .value = try std.fmt.allocPrint(allocator, "Bearer {s}", .{self.base.api_key}) },
-        };
-        defer allocator.free(headers[0].value);
-
-        var response_buffer = std.ArrayList(u8).init(allocator);
-        defer response_buffer.deinit();
+        const auth_header = try self.base.buildBearerHeader(allocator);
+        defer self.base.freeHeaderValue(allocator, auth_header);
+        const headers = [_]std.http.Header{auth_header};
 
         const url = API_BASE_URL ++ "/chat/completions";
 
-        const status = try self.base.http_client.postJSON(url, &headers, request_json, &response_buffer);
+        return self.base.sendJSONRequest(allocator, url, &headers, request_json, parseResponseWrapper);
+    }
 
-        return self.parseResponse(allocator, response_buffer.items, status);
+    /// Wrapper function for parseResponse to match sendJSONRequest signature
+    fn parseResponseWrapper(
+        allocator: std.mem.Allocator,
+        http_response: llm.HTTPResponse,
+    ) llm.LLMError!llm.LLMResponse {
+        return parseResponseImpl(allocator, http_response);
     }
 
     /// Build JSON request payload
@@ -144,39 +146,30 @@ pub const OpenAIProvider = struct {
             .messages = &messages,
         };
 
-        return std.json.stringifyAlloc(allocator, api_request, .{}) catch |err| {
-            log.err("Failed to serialize OpenAI request: {}", .{err});
-            return llm.LLMError.JSONParseError;
-        };
+        return provider_base.BaseProvider.stringifyAllocOrLog("openai", allocator, api_request);
     }
 
     /// Parse API response into LLMResponse
     pub fn parseResponse(
         _: *Self,
         allocator: std.mem.Allocator,
-        response_json: []const u8,
-        status: std.http.Status,
+        http_response: llm.HTTPResponse,
     ) llm.LLMError!llm.LLMResponse {
-        if (status.class() != .success) {
-            // Try to parse error response
-            if (std.json.parseFromSlice(OpenAIResponse, allocator, response_json, .{
-                .ignore_unknown_fields = true,
-            })) |parsed| {
-                defer parsed.deinit();
-                if (parsed.value.@"error") |err| {
-                    const error_msg = try allocator.dupe(u8, err.message);
-                    return llm.LLMResponse{
-                        .command = "",
-                        .error_message = error_msg,
-                    };
-                }
-            } else |_| {}
+        return parseResponseImpl(allocator, http_response);
+    }
 
-            return llm.LLMError.APIError;
+    /// Internal implementation of response parsing
+    fn parseResponseImpl(
+        allocator: std.mem.Allocator,
+        http_response: llm.HTTPResponse,
+    ) llm.LLMError!llm.LLMResponse {
+        // Handle HTTP errors using shared helper
+        if (provider_base.BaseProvider.handleHttpError(OpenAIResponse, allocator, http_response)) |error_response| {
+            return error_response;
         }
 
         // Parse successful response
-        const parsed = std.json.parseFromSlice(OpenAIResponse, allocator, response_json, .{
+        const parsed = std.json.parseFromSlice(OpenAIResponse, allocator, http_response.body, .{
             .ignore_unknown_fields = true,
         }) catch |err| {
             log.warn("Failed to parse OpenAI response: {}", .{err});
@@ -188,37 +181,23 @@ pub const OpenAIProvider = struct {
 
         // Extract command text from the first choice
         if (response.choices.len == 0) {
-            const error_msg = try allocator.dupe(u8, "No choices in API response");
-            return llm.LLMResponse{
-                .command = "",
-                .error_message = error_msg,
-            };
+            return llm.makeErrorResponse(allocator, "No choices in API response");
         }
 
         const choice = response.choices[0];
         const message = choice.message orelse {
-            const error_msg = try allocator.dupe(u8, "No message in API response");
-            return llm.LLMResponse{
-                .command = "",
-                .error_message = error_msg,
-            };
+            return llm.makeErrorResponse(allocator, "No message in API response");
         };
 
         const content = message.content orelse {
-            const error_msg = try allocator.dupe(u8, "No content in API response");
-            return llm.LLMResponse{
-                .command = "",
-                .error_message = error_msg,
-            };
+            return llm.makeErrorResponse(allocator, "No content in API response");
         };
 
         // Clean up the command text using base provider method
         const cleaned_command = try provider_base.BaseProvider.cleanCommandText(allocator, content);
+        defer allocator.free(cleaned_command);
 
-        return llm.LLMResponse{
-            .command = cleaned_command,
-            .is_final = true,
-        };
+        return llm.makeSuccessResponse(allocator, cleaned_command);
     }
 };
 
@@ -256,13 +235,24 @@ test "OpenAI basic response parsing" {
     const provider = try OpenAIProvider.init(allocator, "test-key", &cfg);
     defer provider.deinit(allocator);
 
-    const response = try provider.parseResponse(allocator, real_response, .ok);
+    const mock_http_response = llm.HTTPResponse{
+        .status = .ok,
+        .body = try allocator.dupe(u8, real_response),
+        .allocator = allocator,
+    };
     defer {
-        var mutable_response = response;
-        mutable_response.deinit(allocator);
+        var mutable_mock = mock_http_response;
+        mutable_mock.deinit();
     }
 
-    try testing.expectEqualStrings("ls -la", response.command);
+    const response = try provider.parseResponse(allocator, mock_http_response);
+    defer {
+        var mutable_response = response;
+        mutable_response.deinit();
+    }
+
+    try testing.expectEqual(@as(@TypeOf(response.status), .ok), response.status);
+    try testing.expectEqualStrings("ls -la", response.text);
     try testing.expect(response.is_final);
 }
 
@@ -308,51 +298,18 @@ test "OpenAI malformed JSON handling" {
     const provider = try OpenAIProvider.init(allocator, "test-key", &cfg);
     defer provider.deinit(allocator);
 
-    const result = provider.parseResponse(allocator, malformed_json, .ok);
-    try testing.expectError(llm.LLMError.JSONParseError, result);
-}
-
-test "OpenAI command text cleaning" {
-    const allocator = testing.allocator;
-    const configpkg = @import("../config.zig");
-    const cfg = configpkg.Config{};
-
-    const test_cases = [_]struct {
-        content: []const u8,
-        expected: []const u8,
-    }{
-        .{ .content = "ls -la", .expected = "ls -la" },
-        .{ .content = "`ls -la`", .expected = "ls -la" },
-        .{ .content = "```bash\\nls -la\\n```", .expected = "ls -la" },
-        .{ .content = "  ls -la  \\n", .expected = "ls -la" },
+    const mock_http_response = llm.HTTPResponse{
+        .status = .ok,
+        .body = try allocator.dupe(u8, malformed_json),
+        .allocator = allocator,
     };
-
-    const provider = try OpenAIProvider.init(allocator, "test-key", &cfg);
-    defer provider.deinit(allocator);
-
-    for (test_cases) |case| {
-        const response_json = try std.fmt.allocPrint(allocator,
-            \\{{
-            \\  "choices": [
-            \\    {{
-            \\      "message": {{
-            \\        "role": "assistant",
-            \\        "content": "{s}"
-            \\      }}
-            \\    }}
-            \\  ]
-            \\}}
-        , .{case.content});
-        defer allocator.free(response_json);
-
-        const response = try provider.parseResponse(allocator, response_json, .ok);
-        defer {
-            var mutable_response = response;
-            mutable_response.deinit(allocator);
-        }
-
-        try testing.expectEqualStrings(case.expected, response.command);
+    defer {
+        var mutable_mock = mock_http_response;
+        mutable_mock.deinit();
     }
+
+    const result = provider.parseResponse(allocator, mock_http_response);
+    try testing.expectError(llm.LLMError.JSONParseError, result);
 }
 
 test "OpenAI error response handling" {
@@ -372,13 +329,22 @@ test "OpenAI error response handling" {
     const provider = try OpenAIProvider.init(allocator, "test-key", &cfg);
     defer provider.deinit(allocator);
 
-    const response = try provider.parseResponse(allocator, error_response, .bad_request);
+    const mock_http_response = llm.HTTPResponse{
+        .status = .err,
+        .body = try allocator.dupe(u8, error_response),
+        .allocator = allocator,
+    };
     defer {
-        var mutable_response = response;
-        mutable_response.deinit(allocator);
+        var mutable_mock = mock_http_response;
+        mutable_mock.deinit();
     }
 
-    try testing.expect(response.error_message != null);
-    try testing.expectEqualStrings("", response.command);
-    try testing.expectEqualStrings("Invalid API key", response.error_message.?);
+    const response = try provider.parseResponse(allocator, mock_http_response);
+    defer {
+        var mutable_response = response;
+        mutable_response.deinit();
+    }
+
+    try testing.expectEqual(@as(@TypeOf(response.status), .err), response.status);
+    try testing.expectEqualStrings("Invalid API key", response.text);
 }

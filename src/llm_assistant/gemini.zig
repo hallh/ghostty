@@ -144,9 +144,6 @@ pub const GeminiProvider = struct {
         const request_json = try self.buildRequestJSON(allocator, req);
         defer allocator.free(request_json);
 
-        var response_buffer = std.ArrayList(u8).init(allocator);
-        defer response_buffer.deinit();
-
         const url = try std.fmt.allocPrint(
             allocator,
             "{s}/models/{s}:generateContent?key={s}",
@@ -154,9 +151,18 @@ pub const GeminiProvider = struct {
         );
         defer allocator.free(url);
 
-        const status = try self.base.http_client.postJSON(url, &[_]std.http.Header{}, request_json, &response_buffer);
+        // Gemini doesn't need authentication headers (uses API key in URL)
+        const headers = [_]std.http.Header{};
 
-        return self.parseResponse(allocator, response_buffer.items, status);
+        return self.base.sendJSONRequest(allocator, url, &headers, request_json, parseResponseWrapper);
+    }
+
+    /// Wrapper function for parseResponse to match sendJSONRequest signature
+    fn parseResponseWrapper(
+        allocator: std.mem.Allocator,
+        http_response: llm.HTTPResponse,
+    ) llm.LLMError!llm.LLMResponse {
+        return parseResponseImpl(allocator, http_response);
     }
 
     /// Build JSON request payload
@@ -187,39 +193,30 @@ pub const GeminiProvider = struct {
             .generationConfig = generation_config,
         };
 
-        return std.json.stringifyAlloc(allocator, api_request, .{}) catch |err| {
-            log.err("Failed to serialize Gemini request: {}", .{err});
-            return llm.LLMError.JSONParseError;
-        };
+        return provider_base.BaseProvider.stringifyAllocOrLog("gemini", allocator, api_request);
     }
 
     /// Parse API response into LLMResponse
     pub fn parseResponse(
         _: *Self,
         allocator: std.mem.Allocator,
-        response_json: []const u8,
-        status: std.http.Status,
+        http_response: llm.HTTPResponse,
     ) llm.LLMError!llm.LLMResponse {
-        if (status.class() != .success) {
-            // Try to parse error response
-            if (std.json.parseFromSlice(GeminiResponse, allocator, response_json, .{
-                .ignore_unknown_fields = true,
-            })) |parsed| {
-                defer parsed.deinit();
-                if (parsed.value.@"error") |err| {
-                    const error_msg = try allocator.dupe(u8, err.message);
-                    return llm.LLMResponse{
-                        .command = "",
-                        .error_message = error_msg,
-                    };
-                }
-            } else |_| {}
+        return parseResponseImpl(allocator, http_response);
+    }
 
-            return llm.LLMError.APIError;
+    /// Internal implementation of response parsing
+    fn parseResponseImpl(
+        allocator: std.mem.Allocator,
+        http_response: llm.HTTPResponse,
+    ) llm.LLMError!llm.LLMResponse {
+        // Handle HTTP errors using shared helper
+        if (provider_base.BaseProvider.handleHttpError(GeminiResponse, allocator, http_response)) |error_response| {
+            return error_response;
         }
 
         // Parse successful response
-        const parsed = std.json.parseFromSlice(GeminiResponse, allocator, response_json, .{
+        const parsed = std.json.parseFromSlice(GeminiResponse, allocator, http_response.body, .{
             .ignore_unknown_fields = true,
         }) catch |err| {
             log.err("Failed to parse Gemini response: {}", .{err});
@@ -231,11 +228,7 @@ pub const GeminiProvider = struct {
 
         // Extract command text from the first candidate
         if (response.candidates.len == 0) {
-            const error_msg = try allocator.dupe(u8, "No candidates in API response");
-            return llm.LLMResponse{
-                .command = "",
-                .error_message = error_msg,
-            };
+            return llm.makeErrorResponse(allocator, "No candidates in API response");
         }
 
         const candidate = response.candidates[0];
@@ -243,45 +236,27 @@ pub const GeminiProvider = struct {
         // Check for MAX_TOKENS finish reason with empty/minimal text
         if (candidate.finishReason) |finish_reason| {
             if (std.mem.eql(u8, finish_reason, "MAX_TOKENS")) {
-                const error_msg = try allocator.dupe(u8, "Response truncated due to token limit. Try increasing max_tokens or simplifying the request.");
-                return llm.LLMResponse{
-                    .command = "",
-                    .error_message = error_msg,
-                };
+                return llm.makeErrorResponse(allocator, "Response truncated due to token limit. Try increasing max_tokens or simplifying the request.");
             }
         }
 
         const content = candidate.content orelse {
-            const error_msg = try allocator.dupe(u8, "No content in API response");
-            return llm.LLMResponse{
-                .command = "",
-                .error_message = error_msg,
-            };
+            return llm.makeErrorResponse(allocator, "No content in API response");
         };
 
         if (content.parts.len == 0) {
-            const error_msg = try allocator.dupe(u8, "No parts in API response content");
-            return llm.LLMResponse{
-                .command = "",
-                .error_message = error_msg,
-            };
+            return llm.makeErrorResponse(allocator, "No parts in API response content");
         }
 
         const text = content.parts[0].text orelse {
-            const error_msg = try allocator.dupe(u8, "No text in API response part");
-            return llm.LLMResponse{
-                .command = "",
-                .error_message = error_msg,
-            };
+            return llm.makeErrorResponse(allocator, "No text in API response part");
         };
 
         // Clean up the command text using base provider method
         const cleaned_command = try provider_base.BaseProvider.cleanCommandText(allocator, text);
+        defer allocator.free(cleaned_command);
 
-        return llm.LLMResponse{
-            .command = cleaned_command,
-            .is_final = true,
-        };
+        return llm.makeSuccessResponse(allocator, cleaned_command);
     }
 
     /// Clean up command text to ensure it's a valid shell command
@@ -341,11 +316,10 @@ const TestGeminiProvider = struct {
         const request_json = try self.buildRequestJSON(allocator, req);
         defer allocator.free(request_json);
 
-        var response_buffer = std.ArrayList(u8).init(allocator);
-        defer response_buffer.deinit();
+        var http_response = self.mock_client.postJSON("", &[_]std.http.Header{}, request_json);
+        defer http_response.deinit();
 
-        const status = try self.mock_client.postJSON("", &[_]std.http.Header{}, request_json, &response_buffer);
-        return self.parseResponse(allocator, response_buffer.items, status);
+        return self.parseResponse(allocator, http_response);
     }
 
     // Use GeminiProvider methods for parsing
@@ -372,18 +346,14 @@ const TestGeminiProvider = struct {
         return std.json.stringifyAlloc(allocator, api_request, .{}) catch return llm.LLMError.JSONParseError;
     }
 
-    fn parseResponse(self: *TestGeminiProvider, allocator: std.mem.Allocator, response_json: []const u8, status: std.http.Status) !llm.LLMResponse {
+    fn parseResponse(self: *TestGeminiProvider, allocator: std.mem.Allocator, http_response: llm.HTTPResponse) !llm.LLMResponse {
         _ = self;
 
-        if (status.class() != .success) {
-            const error_msg = try allocator.dupe(u8, "HTTP error");
-            return llm.LLMResponse{
-                .command = "",
-                .error_message = error_msg,
-            };
+        if (http_response.status == .err) {
+            return llm.makeErrorResponse(allocator, "HTTP error");
         }
 
-        const parsed = std.json.parseFromSlice(GeminiProvider.GeminiResponse, allocator, response_json, .{}) catch {
+        const parsed = std.json.parseFromSlice(GeminiProvider.GeminiResponse, allocator, http_response.body, .{}) catch {
             return llm.LLMError.JSONParseError;
         };
         defer parsed.deinit();
@@ -396,20 +366,14 @@ const TestGeminiProvider = struct {
                 if (content.parts.len > 0) {
                     if (content.parts[0].text) |text| {
                         const cleaned_command = try cleanTestCommandText(allocator, text);
-                        return llm.LLMResponse{
-                            .command = cleaned_command,
-                            .is_final = true,
-                        };
+                        defer allocator.free(cleaned_command);
+                        return llm.makeSuccessResponse(allocator, cleaned_command);
                     }
                 }
             }
         }
 
-        const error_msg = try allocator.dupe(u8, "No command text received from API");
-        return llm.LLMResponse{
-            .command = "",
-            .error_message = error_msg,
-        };
+        return llm.makeErrorResponse(allocator, "No command text received from API");
     }
 };
 
@@ -443,13 +407,12 @@ test "Gemini basic response parsing" {
     const request = llm.LLMRequest{ .prompt = "list files" };
     const response = try provider.request(allocator, request);
 
-    try testing.expectEqualStrings("ls -la", response.command);
+    try testing.expectEqual(@as(@TypeOf(response.status), .ok), response.status);
+    try testing.expectEqualStrings("ls -la", response.text);
     try testing.expect(response.is_final);
 
-    if (response.error_message) |msg| {
-        allocator.free(msg);
-    }
-    allocator.free(response.command);
+    var mutable_response = response;
+    mutable_response.deinit();
 }
 
 test "Gemini error response" {
@@ -475,13 +438,10 @@ test "Gemini error response" {
     const request = llm.LLMRequest{ .prompt = "test" };
     const response = try provider.request(allocator, request);
 
-    try testing.expect(response.error_message != null);
-    try testing.expectEqualStrings("", response.command);
+    try testing.expectEqual(@as(@TypeOf(response.status), .err), response.status);
 
-    if (response.error_message) |msg| {
-        allocator.free(msg);
-    }
-    allocator.free(response.command);
+    var mutable_response = response;
+    mutable_response.deinit();
 }
 
 // All Gemini streaming tests removed - functionality intentionally disabled

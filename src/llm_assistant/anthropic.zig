@@ -106,18 +106,21 @@ pub const AnthropicProvider = struct {
         defer allocator.free(request_json);
 
         const headers = [_]std.http.Header{
-            .{ .name = "x-api-key", .value = self.base.api_key },
+            self.base.buildXApiKeyHeader(),
             .{ .name = "anthropic-version", .value = "2023-06-01" },
         };
 
-        var response_buffer = std.ArrayList(u8).init(allocator);
-        defer response_buffer.deinit();
-
         const url = API_BASE_URL ++ "/messages";
 
-        const status = try self.base.http_client.postJSON(url, &headers, request_json, &response_buffer);
+        return self.base.sendJSONRequest(allocator, url, &headers, request_json, parseResponseWrapper);
+    }
 
-        return self.parseResponse(allocator, response_buffer.items, status);
+    /// Wrapper function for parseResponse to match sendJSONRequest signature
+    fn parseResponseWrapper(
+        allocator: std.mem.Allocator,
+        http_response: llm.HTTPResponse,
+    ) llm.LLMError!llm.LLMResponse {
+        return parseResponseImpl(allocator, http_response);
     }
 
     /// Build JSON request payload
@@ -138,39 +141,30 @@ pub const AnthropicProvider = struct {
             .messages = &messages,
         };
 
-        return std.json.stringifyAlloc(allocator, api_request, .{}) catch |err| {
-            log.err("Failed to serialize Anthropic request: {}", .{err});
-            return llm.LLMError.JSONParseError;
-        };
+        return provider_base.BaseProvider.stringifyAllocOrLog("anthropic", allocator, api_request);
     }
 
     /// Parse API response into LLMResponse
     pub fn parseResponse(
         _: *Self,
         allocator: std.mem.Allocator,
-        response_json: []const u8,
-        status: std.http.Status,
+        http_response: llm.HTTPResponse,
     ) llm.LLMError!llm.LLMResponse {
-        if (status.class() != .success) {
-            // Try to parse error response
-            if (std.json.parseFromSlice(AnthropicResponse, allocator, response_json, .{
-                .ignore_unknown_fields = true,
-            })) |parsed| {
-                defer parsed.deinit();
-                if (parsed.value.@"error") |err| {
-                    const error_msg = try allocator.dupe(u8, err.message);
-                    return llm.LLMResponse{
-                        .command = "",
-                        .error_message = error_msg,
-                    };
-                }
-            } else |_| {}
+        return parseResponseImpl(allocator, http_response);
+    }
 
-            return llm.LLMError.APIError;
+    /// Internal implementation of response parsing
+    fn parseResponseImpl(
+        allocator: std.mem.Allocator,
+        http_response: llm.HTTPResponse,
+    ) llm.LLMError!llm.LLMResponse {
+        // Handle HTTP errors using shared helper
+        if (provider_base.BaseProvider.handleHttpError(AnthropicResponse, allocator, http_response)) |error_response| {
+            return error_response;
         }
 
         // Parse successful response
-        const parsed = std.json.parseFromSlice(AnthropicResponse, allocator, response_json, .{
+        const parsed = std.json.parseFromSlice(AnthropicResponse, allocator, http_response.body, .{
             .ignore_unknown_fields = true,
         }) catch |err| {
             log.err("Failed to parse Anthropic response: {}", .{err});
@@ -193,20 +187,14 @@ pub const AnthropicProvider = struct {
         }
 
         if (command_text.items.len == 0) {
-            const error_msg = try allocator.dupe(u8, "No command text received from API");
-            return llm.LLMResponse{
-                .command = "",
-                .error_message = error_msg,
-            };
+            return llm.makeErrorResponse(allocator, "No command text received from API");
         }
 
         // Clean up the command text using base provider method
         const cleaned_command = try provider_base.BaseProvider.cleanCommandText(allocator, command_text.items);
+        defer allocator.free(cleaned_command);
 
-        return llm.LLMResponse{
-            .command = cleaned_command,
-            .is_final = true,
-        };
+        return llm.makeSuccessResponse(allocator, cleaned_command);
     }
 };
 
@@ -261,11 +249,10 @@ const TestAnthropicProvider = struct {
         const request_json = try self.buildRequestJSON(allocator, req, false);
         defer allocator.free(request_json);
 
-        var response_buffer = std.ArrayList(u8).init(allocator);
-        defer response_buffer.deinit();
+        var http_response = self.mock_client.postJSON("", &[_]std.http.Header{}, request_json);
+        defer http_response.deinit();
 
-        const status = try self.mock_client.postJSON("", &[_]std.http.Header{}, request_json, &response_buffer);
-        return self.parseResponse(allocator, response_buffer.items, status);
+        return self.parseResponse(allocator, http_response);
     }
 
     pub fn requestStream(
@@ -296,18 +283,14 @@ const TestAnthropicProvider = struct {
         return std.json.stringifyAlloc(allocator, api_request, .{}) catch return llm.LLMError.JSONParseError;
     }
 
-    fn parseResponse(self: *TestAnthropicProvider, allocator: std.mem.Allocator, response_json: []const u8, status: std.http.Status) !llm.LLMResponse {
+    fn parseResponse(self: *TestAnthropicProvider, allocator: std.mem.Allocator, http_response: llm.HTTPResponse) !llm.LLMResponse {
         _ = self;
 
-        if (status.class() != .success) {
-            const error_msg = try allocator.dupe(u8, "HTTP error");
-            return llm.LLMResponse{
-                .command = "",
-                .error_message = error_msg,
-            };
+        if (http_response.status == .err) {
+            return llm.makeErrorResponse(allocator, "HTTP error");
         }
 
-        const parsed = std.json.parseFromSlice(AnthropicProvider.AnthropicResponse, allocator, response_json, .{}) catch {
+        const parsed = std.json.parseFromSlice(AnthropicProvider.AnthropicResponse, allocator, http_response.body, .{}) catch {
             return llm.LLMError.JSONParseError;
         };
         defer parsed.deinit();
@@ -318,19 +301,13 @@ const TestAnthropicProvider = struct {
             if (std.mem.eql(u8, content.type, "text")) {
                 if (content.text) |text| {
                     const cleaned_command = try cleanTestCommandText(allocator, text);
-                    return llm.LLMResponse{
-                        .command = cleaned_command,
-                        .is_final = true,
-                    };
+                    defer allocator.free(cleaned_command);
+                    return llm.makeSuccessResponse(allocator, cleaned_command);
                 }
             }
         }
 
-        const error_msg = try allocator.dupe(u8, "No command text received from API");
-        return llm.LLMResponse{
-            .command = "",
-            .error_message = error_msg,
-        };
+        return llm.makeErrorResponse(allocator, "No command text received from API");
     }
 };
 
@@ -373,13 +350,12 @@ test "Anthropic basic response parsing" {
     const request = llm.LLMRequest{ .prompt = "list files" };
     const response = try provider.request(allocator, request);
 
-    try testing.expectEqualStrings("ls -la", response.command);
+    try testing.expectEqual(@as(@TypeOf(response.status), .ok), response.status);
+    try testing.expectEqualStrings("ls -la", response.text);
     try testing.expect(response.is_final);
 
-    if (response.error_message) |msg| {
-        allocator.free(msg);
-    }
-    allocator.free(response.command);
+    var mutable_response = response;
+    mutable_response.deinit();
 }
 
 // Anthropic streaming tests removed - streaming functionality intentionally disabled
@@ -407,13 +383,10 @@ test "Anthropic error response" {
     const request = llm.LLMRequest{ .prompt = "test" };
     const response = try provider.request(allocator, request);
 
-    try testing.expect(response.error_message != null);
-    try testing.expectEqualStrings("", response.command);
+    try testing.expectEqual(@as(@TypeOf(response.status), .err), response.status);
 
-    if (response.error_message) |msg| {
-        allocator.free(msg);
-    }
-    allocator.free(response.command);
+    var mutable_response = response;
+    mutable_response.deinit();
 }
 
 // Streaming tests removed - functionality intentionally disabled

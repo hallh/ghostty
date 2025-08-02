@@ -149,14 +149,20 @@ Advanced font handling and text shaping:
 
 ### 8. LLM Assistant (`src/llm_assistant/`)
 
-AI-powered command generation with multi-provider support:
+AI-powered command generation with cross-platform architecture:
 
-- **Architecture**: Modular provider system with shared base functionality
-- **Providers**: Anthropic, OpenAI, and Gemini integrations
-- **Key Files**:
-  - `src/llm_assistant/provider_base.zig` - Shared provider functionality
-  - `src/apprt/gtk/llm/` - GTK UI helper modules (history, context, worker, prompt building)
-- **Features**: Terminal context capture, background processing, prompt history
+- **Architecture**: Cross-platform core with thin platform adapters following Ghostty's established patterns
+- **Providers**: Anthropic, OpenAI, and Gemini integrations with shared base functionality
+- **Core Files**:
+  - `src/llm_assistant/provider_base.zig` - Shared provider functionality and HTTP client
+  - `src/llm_assistant/terminal_context.zig` - Cross-platform terminal context extraction
+  - `src/llm_assistant/worker_core.zig` - Background worker with callback scheduler interface
+  - `src/llm_assistant/history.zig` - Cross-platform prompt history management
+  - `src/llm_assistant/prompt_builder.zig` - Context-enhanced prompt generation
+- **Platform Adapters**:
+  - `src/apprt/gtk/llm/` - GTK-specific adapters (terminal context, history, worker)
+  - `src/apprt/embedded/llm/` - macOS/libghostty adapters
+- **Features**: Terminal context capture, background processing, prompt history, C API integration
 
 ## Shortcuts and Keybindings
 
