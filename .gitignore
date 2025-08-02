@@ -21,5 +21,3 @@ glad.zip
 /Box_test.ppm
 /Box_test_diff.ppm
 /ghostty.qcow2
-agents/tasks
-kcov-output

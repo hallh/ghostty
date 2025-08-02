@@ -183,8 +183,6 @@ pub fn build(b: *std.Build) !void {
 
     // Tests
     {
-        const test_coverage = b.option(bool, "test-coverage", "Generate test coverage") orelse false;
-
         const test_exe = b.addTest(.{
             .name = "ghostty-test",
             .filters = if (test_filter) |v| &.{v} else &.{},
@@ -197,17 +195,6 @@ pub fn build(b: *std.Build) !void {
                 .unwind_tables = .sync,
             }),
         });
-
-        if (test_coverage) {
-            // with kcov
-            test_exe.setExecCmd(&[_]?[]const u8{
-                "kcov",
-                "--include-pattern=ghostty/src/",
-                "--dump-summary",
-                "kcov-output", // output dir for kcov
-                null, // to get zig to use the --test-cmd-bin flag
-            });
-        }
 
         if (config.emit_test_exe) b.installArtifact(test_exe);
         _ = try deps.add(test_exe);
