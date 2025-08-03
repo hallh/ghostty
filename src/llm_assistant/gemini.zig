@@ -16,11 +16,6 @@ pub const GeminiProvider = struct {
     /// Default Gemini API endpoint
     const API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 
-    /// Provider-specific defaults (model comes from config)
-    const DEFAULTS = provider_base.Defaults{
-        // Note: max_tokens intentionally omitted due to Gemini API bug with token limiting
-    };
-
     /// Gemini request structure
     const GeminiRequest = struct {
         contents: []const Content,
@@ -116,7 +111,7 @@ pub const GeminiProvider = struct {
         errdefer allocator.destroy(provider);
 
         provider.* = GeminiProvider{
-            .base = try provider_base.BaseProvider.init(allocator, api_key, .gemini, cfg, DEFAULTS),
+            .base = try provider_base.BaseProvider.init(allocator, api_key, .gemini, cfg),
         };
 
         return provider;

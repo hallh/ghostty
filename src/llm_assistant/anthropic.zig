@@ -17,8 +17,6 @@ pub const AnthropicProvider = struct {
     const API_BASE_URL = "https://api.anthropic.com/v1";
 
     /// Provider-specific defaults (model comes from config)
-    const DEFAULTS = provider_base.Defaults{};
-
     /// Anthropic request structure
     const AnthropicRequest = struct {
         model: []const u8,
@@ -77,7 +75,7 @@ pub const AnthropicProvider = struct {
         errdefer allocator.destroy(provider);
 
         provider.* = AnthropicProvider{
-            .base = try provider_base.BaseProvider.init(allocator, api_key, .anthropic, cfg, DEFAULTS),
+            .base = try provider_base.BaseProvider.init(allocator, api_key, .anthropic, cfg),
         };
 
         return provider;

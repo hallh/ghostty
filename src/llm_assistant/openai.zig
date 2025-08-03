@@ -17,8 +17,6 @@ pub const OpenAIProvider = struct {
     const API_BASE_URL = "https://api.openai.com/v1";
 
     /// Provider-specific defaults (model comes from config)
-    const DEFAULTS = provider_base.Defaults{};
-
     /// OpenAI request structure
     const OpenAIRequest = struct {
         model: []const u8,
@@ -83,7 +81,7 @@ pub const OpenAIProvider = struct {
         errdefer allocator.destroy(provider);
 
         provider.* = OpenAIProvider{
-            .base = try provider_base.BaseProvider.init(allocator, api_key, .openai, cfg, DEFAULTS),
+            .base = try provider_base.BaseProvider.init(allocator, api_key, .openai, cfg),
         };
 
         return provider;
@@ -218,7 +216,8 @@ const MockHTTPClient = test_utils.MockHTTPClient;
 test "OpenAI basic response parsing" {
     const allocator = testing.allocator;
     const configpkg = @import("../config.zig");
-    const cfg = configpkg.Config{};
+    var cfg = configpkg.Config{};
+    cfg.@"ext-llm-system-prompt" = "test system prompt";
 
     const real_response =
         \\{
@@ -259,7 +258,8 @@ test "OpenAI basic response parsing" {
 test "OpenAI JSON request generation" {
     const allocator = testing.allocator;
     const configpkg = @import("../config.zig");
-    const cfg = configpkg.Config{};
+    var cfg = configpkg.Config{};
+    cfg.@"ext-llm-system-prompt" = "test system prompt";
 
     const provider = try OpenAIProvider.init(allocator, "test-key", &cfg);
     defer provider.deinit(allocator);
@@ -292,7 +292,8 @@ test "OpenAI JSON request generation" {
 test "OpenAI malformed JSON handling" {
     const allocator = testing.allocator;
     const configpkg = @import("../config.zig");
-    const cfg = configpkg.Config{};
+    var cfg = configpkg.Config{};
+    cfg.@"ext-llm-system-prompt" = "test system prompt";
 
     const malformed_json = "{ invalid json ]}";
     const provider = try OpenAIProvider.init(allocator, "test-key", &cfg);
@@ -314,7 +315,8 @@ test "OpenAI malformed JSON handling" {
 test "OpenAI error response handling" {
     const allocator = testing.allocator;
     const configpkg = @import("../config.zig");
-    const cfg = configpkg.Config{};
+    var cfg = configpkg.Config{};
+    cfg.@"ext-llm-system-prompt" = "test system prompt";
 
     const error_response =
         \\{

@@ -64,7 +64,7 @@ pub const blueprint_files = [_]VersionedBlueprint{
     .{ .major = 1, .minor = 5, .name = "config-errors-dialog" },
     .{ .major = 1, .minor = 0, .name = "menu-headerbar-split_menu" },
     .{ .major = 1, .minor = 5, .name = "command-palette" },
-    .{ .major = 1, .minor = 5, .name = "llm-assistant-dialog" },
+    .{ .major = 1, .minor = 5, .name = "llm-assistant-dialog" }, // TODO: Should this be a different version?
     .{ .major = 1, .minor = 0, .name = "menu-surface-context_menu" },
     .{ .major = 1, .minor = 0, .name = "menu-window-titlebar_menu" },
     .{ .major = 1, .minor = 5, .name = "ccw-osc-52-read" },
