@@ -525,6 +525,7 @@ pub fn performAction(
         .show_child_exited => return try self.showChildExited(target, value),
         .progress_report => return try self.handleProgressReport(target, value),
         .render => self.render(target),
+        .llm_command_assistant => try self.llmCommandAssistant(target),
 
         // Unimplemented
         .close_all_windows,
@@ -1061,6 +1062,10 @@ fn configChange(
                     const surface = core_surface.rt_surface;
                     if (surface.container.window()) |window| {
                         window.onConfigReloaded();
+                        // Update window config to ensure all components (including LLM dialog) are updated
+                        window.updateConfig(&self.config) catch |err| {
+                            log.warn("error updating config for window err={}", .{err});
+                        };
                         break :window window;
                     }
                 }
@@ -1888,4 +1893,21 @@ fn openUrl(
         value.kind,
         value.url,
     ) catch |err| log.warn("unable to open url: {}", .{err});
+}
+
+fn llmCommandAssistant(_: *App, target: apprt.Target) !void {
+    switch (target) {
+        .app => {},
+        .surface => |surface| {
+            const window = surface.rt_surface.container.window() orelse {
+                log.info(
+                    "llmCommandAssistant invalid for container={s}",
+                    .{@tagName(surface.rt_surface.container)},
+                );
+                return;
+            };
+
+            window.showLLMAssistant();
+        },
+    }
 }

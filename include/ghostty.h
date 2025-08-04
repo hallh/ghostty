@@ -757,6 +757,7 @@ typedef enum {
   GHOSTTY_ACTION_OPEN_URL,
   GHOSTTY_ACTION_SHOW_CHILD_EXITED,
   GHOSTTY_ACTION_PROGRESS_REPORT,
+  GHOSTTY_ACTION_LLM_COMMAND_ASSISTANT,
 } ghostty_action_tag_e;
 
 typedef union {
@@ -992,6 +993,18 @@ void ghostty_set_window_background_blur(ghostty_app_t, void*);
 
 // Benchmark API, if available.
 bool ghostty_benchmark_cli(const char*, const char*);
+
+//-------------------------------------------------------------------
+// LLM Assistant API
+
+// Get terminal context for LLM assistant from a surface.
+// The returned string must be freed by the caller using ghostty_string_free.
+ghostty_string_s ghostty_surface_llm_terminal_context(ghostty_surface_t surface);
+
+// Trigger the LLM command assistant for a surface.
+// This is equivalent to the llm_command_assistant action.
+// Returns true if the action was successfully dispatched.
+bool ghostty_surface_llm_command_assistant(ghostty_surface_t surface);
 
 #ifdef __cplusplus
 }

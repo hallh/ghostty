@@ -180,6 +180,7 @@ test {
     _ = @import("input.zig");
     _ = @import("cli.zig");
     _ = @import("surface_mouse.zig");
+    _ = @import("llm_assistant.zig");
 
     // Libraries
     _ = @import("benchmark/main.zig");

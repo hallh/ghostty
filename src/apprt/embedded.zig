@@ -18,6 +18,7 @@ const terminal = @import("../terminal/main.zig");
 const CoreApp = @import("../App.zig");
 const CoreInspector = @import("../inspector/main.zig").Inspector;
 const CoreSurface = @import("../Surface.zig");
+const String = @import("../main_c.zig").String;
 const configpkg = @import("../config.zig");
 const Config = configpkg.Config;
 
@@ -2143,6 +2144,51 @@ pub const CAPI = struct {
                 v.deinit();
                 ptr.backend = null;
             }
+        }
+
+        /// Get terminal context for LLM assistant from a surface.
+        /// The returned string must be freed by the caller using ghostty_string_free.
+        export fn ghostty_surface_llm_terminal_context(ptr: *Surface) String {
+            const embedded_terminal_context = @import("embedded/llm/terminal_context_embedded.zig");
+
+            // Get terminal context using the cross-platform implementation
+            var context = embedded_terminal_context.getTerminalContext(
+                ptr.app.core_app.alloc,
+                ptr,
+            ) catch |err| {
+                log.err("error getting terminal context err={}", .{err});
+                return String.empty;
+            };
+            defer if (context) |*c| c.deinit();
+
+            // Guard clause: early return if no context
+            const c = context orelse return String.empty;
+
+            // Guard clause: early return if no content
+            const content = c.current_input_full_line orelse return String.empty;
+
+            // Duplicate the content
+            const result = ptr.app.core_app.alloc.dupe(u8, content) catch |err| {
+                log.err("error duplicating terminal context err={}", .{err});
+                return String.empty;
+            };
+
+            return String.fromSlice(result);
+        }
+
+        /// Trigger the LLM command assistant for a surface.
+        /// This is equivalent to the llm_command_assistant action.
+        export fn ghostty_surface_llm_command_assistant(ptr: *Surface) bool {
+            // Trigger the llm_command_assistant action via the embedded action system
+            const result = ptr.app.performAction(
+                .{ .surface = &ptr.core_surface },
+                .llm_command_assistant,
+                {},
+            ) catch |err| {
+                log.err("error triggering llm command assistant err={}", .{err});
+                return false;
+            };
+            return result;
         }
     };
 };

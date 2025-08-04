@@ -3052,6 +3052,104 @@ term: []const u8 = "xterm-ghostty",
 /// This only works on macOS since only macOS has an auto-update feature.
 @"auto-update-channel": ?build_config.ReleaseChannel = null,
 
+/// API key for Anthropic Claude models. Store this securely in your
+/// configuration file. Get your API key from: https://console.anthropic.com/
+///
+/// Example: `ext-llm-anthropic-api-key = "sk-ant-..."`
+///
+/// Available since: TODO: add version
+@"ext-llm-anthropic-api-key": ?[]const u8 = null,
+
+/// API key for OpenAI GPT models. Store this securely in your
+/// configuration file. Get your API key from: https://platform.openai.com/api-keys
+///
+/// Example: `ext-llm-openai-api-key = "sk-..."`
+///
+/// Available since: TODO: add version
+@"ext-llm-openai-api-key": ?[]const u8 = null,
+
+/// API key for Google Gemini models. Store this securely in your
+/// configuration file. Get your API key from: https://aistudio.google.com/app/apikey
+///
+/// Example: `ext-llm-gemini-api-key = "AIza..."`
+///
+/// Available since: TODO: add version
+@"ext-llm-gemini-api-key": ?[]const u8 = null,
+
+/// LLM provider to use for command suggestions. Supported providers are:
+///
+///   * `anthropic` - Uses Claude models via Anthropic's API
+///   * `openai` - Uses GPT models via OpenAI's API
+///   * `gemini` - Uses Gemini models via Google's API
+///
+/// Each provider may have different API key requirements and model options.
+/// See the provider's documentation for details.
+///
+/// Available since: TODO: add version
+@"ext-llm-provider": LLMProvider = .anthropic,
+
+/// Model to use for Anthropic Claude. Defaults to "claude-3-7-sonnet-latest".
+/// Get available models from: https://docs.anthropic.com/en/docs/about-claude/models
+///
+/// Example: `ext-llm-anthropic-model = "claude-3-5-sonnet-latest"`
+///
+/// Available since: TODO: add version
+@"ext-llm-anthropic-model": ?[]const u8 = "claude-3-7-sonnet-latest",
+
+/// Model to use for OpenAI GPT. Defaults to "gpt-4.1".
+/// Get available models from: https://platform.openai.com/docs/models
+///
+/// Example: `ext-llm-openai-model = "gpt-4o-mini"`
+///
+/// Available since: TODO: add version
+@"ext-llm-openai-model": ?[]const u8 = "gpt-4.1",
+
+/// Model to use for Google Gemini. Defaults to "gemini-2.5-flash".
+/// Get available models from: https://ai.google.dev/gemini-api/docs/models/gemini
+///
+/// Example: `ext-llm-gemini-model = "gemini-2.5-pro"`
+///
+/// Available since: TODO: add version
+@"ext-llm-gemini-model": ?[]const u8 = "gemini-2.5-flash",
+
+/// Temperature for response generation. Lower values make the
+/// model more focused and deterministic, higher values make it more creative
+/// and random. For command suggestions, lower values (0.1-0.3) are typically
+/// better for consistent, accurate results.
+@"ext-llm-temperature": f32 = 1,
+
+/// Maximum number of tokens to generate in the response. This controls the
+/// length of the command suggestion. For most command suggestions, 1024
+/// tokens should be more than sufficient.
+///
+/// Available since: TODO: add version
+@"ext-llm-max-tokens": u32 = 4096,
+
+/// Custom system prompt to override the default. The default prompt instructs
+/// the model to provide only the exact command needed without explanation.
+/// Only change this if you understand how it will affect the response format.
+///
+/// Default: "You are a Linux command assistant. Given a user's description,
+/// provide only the exact command they need. Respond with just the command,
+/// no explanation."
+///
+/// Available since: TODO: add version
+@"ext-llm-system-prompt": ?[]const u8 = null,
+
+/// Number of previous prompts to keep in history for navigation with up/down
+/// arrow keys. History is kept in memory only and is cleared when Ghostty
+/// restarts.
+///
+/// Available since: TODO: add version
+@"ext-llm-history-size": u32 = 50,
+
+/// Default state for including terminal context in LLM prompts. When true,
+/// the terminal history and current line context will be included by default
+/// when making LLM requests. Users can toggle this on/off in the modal dialog.
+///
+/// Available since: TODO: add version
+@"ext-llm-default-terminal-context": bool = true,
+
 /// This is set by the CLI parser for deinit.
 _arena: ?ArenaAllocator = null,
 
@@ -5431,6 +5529,13 @@ pub const Keybinds = struct {
             .{ .write_screen_file = .open },
         );
 
+        // LLM Command Assistant
+        try self.set.put(
+            alloc,
+            .{ .key = .{ .unicode = 'k' }, .mods = .{ .ctrl = true, .shift = true } },
+            .{ .llm_command_assistant = {} },
+        );
+
         // Expand Selection
         try self.set.putFlags(
             alloc,
@@ -7359,6 +7464,12 @@ pub const AutoUpdate = enum {
     off,
     check,
     download,
+};
+
+pub const LLMProvider = enum {
+    anthropic,
+    openai,
+    gemini,
 };
 
 /// See background-blur

@@ -4893,6 +4893,14 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             screen.dirty.selection = true;
             try self.queueRender();
         },
+
+        .llm_command_assistant => {
+            _ = try self.rt_app.performAction(
+                .{ .surface = self },
+                .llm_command_assistant,
+                {},
+            );
+        },
     }
 
     return true;

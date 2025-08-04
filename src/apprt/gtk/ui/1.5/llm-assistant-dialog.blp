@@ -1,0 +1,196 @@
+using Gtk 4.0;
+using Adw 1;
+
+Adw.Dialog llm-assistant-dialog {
+  content-width: 480;
+  content-height: 240;
+
+  Adw.ToolbarView {
+    top-bar-style: flat;
+
+    [top]
+    Adw.HeaderBar {
+      [title]
+      Label {
+        label: _("Command Assistant");
+      }
+    }
+
+    Box {
+      orientation: vertical;
+      margin-top: 12;
+      margin-bottom: 12;
+      margin-start: 12;
+      margin-end: 12;
+
+      Box {
+        orientation: vertical;
+        spacing: 12;
+        vexpand: true;
+
+      // Input section
+      Box input-box {
+        orientation: vertical;
+        spacing: 6;
+
+        Label {
+          label: _("Describe what you want to do:");
+          halign: start;
+
+          styles [
+            "heading"
+          ]
+        }
+
+        Entry prompt-entry {
+          placeholder-text: _("e.g., \"list all files including hidden ones\"");
+          hexpand: true;
+          margin-bottom: 12;
+
+          styles [
+            "card"
+          ]
+        }
+
+        Box {
+          orientation: horizontal;
+          spacing: 6;
+
+          CheckButton context-checkbox {
+            label: _("Include terminal context");
+            halign: start;
+            valign: center;
+            active: true;
+          }
+
+          Box {
+            orientation: horizontal;
+            spacing: 6;
+            halign: end;
+            hexpand: true;
+
+            Button cancel-button {
+              label: _("Cancel");
+
+              styles [
+                "flat"
+              ]
+            }
+
+            Button submit-button {
+              label: _("Get Suggestion");
+              sensitive: false;
+
+              styles [
+                "suggested-action"
+              ]
+            }
+          }
+        }
+      }
+
+      // Suggestion section
+      Box suggestion-box {
+        orientation: vertical;
+        spacing: 6;
+        visible: false;
+
+        Label suggestion-title-label {
+          label: _("Suggested Command:");
+          halign: start;
+
+          styles [
+            "heading"
+          ]
+        }
+
+        ScrolledWindow {
+          min-content-height: 80;
+          max-content-height: 120;
+
+          TextView suggestion-text {
+            editable: false;
+            cursor-visible: false;
+            wrap-mode: word_char;
+            left-margin: 12;
+            right-margin: 12;
+            top-margin: 8;
+            bottom-margin: 8;
+
+            styles [
+              "card",
+              "monospace"
+            ]
+          }
+        }
+
+        // Progress indicator for streaming
+        ProgressBar progress-bar {
+          visible: false;
+          pulse-step: 0.1;
+
+          styles [
+            "osd"
+          ]
+        }
+
+        // Error message area  
+        Label error-label {
+          visible: false;
+          wrap: true;
+          wrap-mode: word_char;
+          halign: start;
+          justify: fill;
+
+          styles [
+            "error",
+            "body"
+          ]
+        }
+
+        Box {
+          orientation: horizontal;
+          spacing: 6;
+          halign: end;
+
+          Button clear-button {
+            label: _("Back");
+            visible: false;
+
+            styles [
+              "flat"
+            ]
+          }
+
+          Button accept-button {
+            label: _("Insert Command");
+            visible: false;
+
+            styles [
+              "suggested-action"
+            ]
+          }
+        }
+      }
+
+        // Spacer to push content up (only visible in input state)
+        Box input-spacer {
+          vexpand: true;
+          visible: true;
+        }
+      }
+
+      // Keyboard shortcuts hints - anchored to bottom
+      Label shortcuts-hint {
+        label: _("↑↓ Navigate history");
+        halign: start;
+        margin-bottom: 0;
+
+        styles [
+          "caption",
+          "dim-label"
+        ]
+      }
+    }
+  }
+} 

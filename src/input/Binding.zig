@@ -727,6 +727,15 @@ pub const Action = union(enum) {
     ///
     crash: CrashThread,
 
+    /// Open the LLM command assistant dialog to get command suggestions.
+    ///
+    /// This opens a dialog where you can describe what you want to do
+    /// and get AI-powered command suggestions from configured LLM providers
+    /// (Anthropic, OpenAI, or Gemini).
+    ///
+    /// The default keybinding is `ctrl+shift+k`.
+    llm_command_assistant,
+
     pub const Key = @typeInfo(Action).@"union".tag_type.?;
 
     pub const CrashThread = enum {
@@ -1042,6 +1051,7 @@ pub const Action = union(enum) {
             .toggle_command_palette,
             .reset_window_size,
             .crash,
+            .llm_command_assistant,
             => .surface,
 
             // These are less obvious surface actions. They're surface
